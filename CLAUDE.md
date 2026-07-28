@@ -10,7 +10,9 @@ suite — just `main.py` and the `osmcity/` package, Poetry for dependencies, an
 (`origin` is `github.com:christopher-schroeder/voxity`).
 
 `.osm.pbf` extracts are **not** in the repo (`.gitignore`), nor is `cache/` or `env/`.
-A fresh clone needs an extract downloaded before it can run — see README.
+`main.ensure_pbf` fetches the default extract from Geofabrik on first run, so a fresh
+clone works unattended; `DEFAULT_PBF` and `PBF_URL` must stay in step, since the URL is
+built from the filename. Any other `--pbf` needs an explicit `--pbf-url`.
 
 ## Running
 

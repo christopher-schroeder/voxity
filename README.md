@@ -15,16 +15,31 @@ shadow-mapped sun.
 
 ## The extract
 
-`.osm.pbf` files are not in the repo — they are large and reproducible. Grab one
-from [Geofabrik](https://download.geofabrik.de/):
+`.osm.pbf` files are not in the repo — they are large and reproducible. The default
+one is **fetched automatically on first run** (51 MB from
+[Geofabrik](https://download.geofabrik.de/), with a progress line), so a fresh clone
+just works:
 
 ```
-wget https://download.geofabrik.de/europe/germany/hamburg-latest.osm.pbf
-./env/bin/osm-city --pbf hamburg-latest.osm.pbf --place rathaus
+./env/bin/osm-city --place rathaus
+fetching https://download.geofabrik.de/europe/germany/hamburg-260728.osm.pbf
+     51.0 MB  100.0%
 ```
 
-The built-in `--place` presets are all Hamburg, and `--pbf` defaults to
-`hamburg-260728.osm.pbf`; pass `--pbf` for any other extract.
+It streams through a `.part` file and renames only on success, so an interrupted
+download never leaves a truncated extract behind. Once the file is there it is never
+re-fetched.
+
+For any other region, give both the file and where to get it — the region path can't
+be guessed from a filename:
+
+```
+./env/bin/osm-city --pbf berlin.osm.pbf \
+    --pbf-url https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf
+```
+
+`--no-download` turns the fetch off and fails on a missing extract instead. Note the
+built-in `--place` presets are all Hamburg.
 
 ## Controls
 
@@ -47,6 +62,8 @@ The built-in `--place` presets are all Hamburg, and `--pbf` defaults to
 
 ```
 --pbf FILE        input extract        (default hamburg-260728.osm.pbf)
+--pbf-url URL     where to fetch --pbf from when it is missing
+--no-download     fail on a missing extract instead of downloading it
 --place NAME      named preset         (--list-places to see them)
 --center LAT,LON  centre of the square
 --bbox W,S,E,N    explicit box in degrees

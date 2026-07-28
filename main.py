@@ -19,6 +19,12 @@ from osmcity.build import build_scene
 from osmcity.camera import Camera
 from osmcity.geo import square_bbox
 
+DEFAULT_PBF = 'hamburg-260728.osm.pbf'
+# Geofabrik names its dated snapshots exactly like DEFAULT_PBF, so the default
+# extract round-trips to a real URL and can be fetched on demand. Any other
+# --pbf needs its own --pbf-url; we can't guess the region path from a filename.
+PBF_URL = 'https://download.geofabrik.de/europe/germany/' + DEFAULT_PBF
+
 PLACES = {
     'rathaus':         (53.5503, 9.9937),
     'speicherstadt':   (53.5436, 9.9885),
@@ -53,7 +59,10 @@ HELP_LINES = [
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--pbf', default='hamburg-260728.osm.pbf', help='input .osm.pbf')
+    p.add_argument('--pbf', default=DEFAULT_PBF, help='input .osm.pbf')
+    p.add_argument('--pbf-url', help='where to fetch --pbf from when it is missing')
+    p.add_argument('--no-download', action='store_true',
+                   help='fail on a missing extract instead of downloading it')
     g = p.add_mutually_exclusive_group()
     g.add_argument('--center', help='LAT,LON centre of the square')
     g.add_argument('--place', help='named preset (see --list-places)')
@@ -93,9 +102,54 @@ def resolve_bbox(args):
 MESH_VERSION = 1
 
 
+def download_pbf(url, path):
+    """Stream `url` into `path`, writing through a `.part` file.
+
+    The rename is the last step on purpose: a half-written extract left under
+    the real name passes the existence check on the next run and then dies deep
+    inside osmium, which reads as a parser bug rather than a broken download.
+    """
+    # only needed on the rare download path, so keep it out of startup
+    import urllib.error
+    import urllib.request
+
+    tmp = path + '.part'
+    print(f'fetching {url}')
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp, open(tmp, 'wb') as fh:
+            total = int(resp.headers.get('Content-Length') or 0)
+            done = 0
+            while chunk := resp.read(1 << 20):
+                fh.write(chunk)
+                done += len(chunk)
+                pct = f'  {100 * done / total:5.1f}%' if total else ''
+                print(f'\r  {done / 1048576:7.1f} MB{pct}', end='', flush=True)
+        print()
+    except (urllib.error.URLError, OSError, KeyboardInterrupt) as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        sys.exit(f'\ndownload failed: {exc}')
+    os.replace(tmp, path)
+
+
+def ensure_pbf(args):
+    """Make sure the extract is on disk, fetching it on first run if not."""
+    if os.path.exists(args.pbf):
+        return
+    if args.no_download:
+        sys.exit(f'no such file: {args.pbf}  (--no-download given)')
+    url = args.pbf_url
+    if url is None:
+        if os.path.basename(args.pbf) != DEFAULT_PBF:
+            sys.exit(f'no such file: {args.pbf}\n'
+                     'give --pbf-url to fetch it, or grab an extract from '
+                     'https://download.geofabrik.de/')
+        url = PBF_URL
+    download_pbf(url, args.pbf)
+
+
 def prepare(args):
-    if not os.path.exists(args.pbf):
-        sys.exit(f'no such file: {args.pbf}')
+    ensure_pbf(args)
     bbox = resolve_bbox(args)
     print(f'bbox  W {bbox[0]:.5f}  S {bbox[1]:.5f}  E {bbox[2]:.5f}  N {bbox[3]:.5f}')
     scene = extract.load(args.pbf, bbox, use_cache=not args.no_cache)
