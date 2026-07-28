@@ -1,0 +1,21 @@
+# conda environment (recreate with the commands in README)
+env/
+.venv/
+
+# OSM extracts: large reproducible downloads, see README
+*.osm.pbf
+
+# derived data — deleting these is always safe
+cache/
+screenshots/
+
+# python / tooling
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# local-only Claude Code permissions
+.claude/settings.local.json

@@ -1,0 +1,7 @@
+[virtualenvs]
+# ./env is a conda environment and Poetry lives inside it, so Poetry must not
+# create a virtualenv of its own — it installs into the interpreter it runs
+# under. Always drive it as ./env/bin/poetry; a Poetry from anywhere else would
+# resolve "the active interpreter" to something other than ./env.
+create = false
+in-project = false

@@ -1,0 +1,52 @@
+[project]
+name = "osm-city"
+version = "0.1.0"
+description = "Build and fly through a 3D city from an .osm.pbf extract"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = "MIT"
+authors = [
+    { name = "Christopher Schroeder", email = "christopher.schroeder@tu-dortmund.de" },
+]
+dependencies = [
+    # .osm.pbf reading; FileProcessor + osmium.filter need pyosmium >= 3.7
+    "osmium (>=3.7)",
+    "numpy (>=1.24)",
+    "mapbox-earcut (>=1.0)",
+    "moderngl (>=5.8)",
+    "pygame (>=2.5)",
+]
+
+[project.scripts]
+osm-city = "main:main"
+
+[tool.poetry]
+# main.py is a top-level module, not a package, so include it explicitly
+packages = [
+    { include = "osmcity" },
+    { include = "main.py" },
+]
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.6"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 95
+target-version = "py310"
+# ./env is a conda environment, so it has no pyvenv.cfg for Ruff's automatic
+# virtualenv detection to find — without this it lints the whole environment.
+extend-exclude = ["env"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "C4", "BLE", "RUF"]
+ignore = [
+    "E741",    # ortho(l, r, b, t, n, f) reads better than renamed matrix args
+    "RUF005",  # explicit list concatenation is clearer in the ring loops
+]
+
+[tool.ruff.format]
+quote-style = "single"
