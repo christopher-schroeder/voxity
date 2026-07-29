@@ -174,13 +174,21 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
 
 ## Conventions that cut across files
 
-**Map orientation is a third coordinate convention, and it flips twice.** overview.py
-bakes with a *negative* y scale so north (−z) lands at the top of the framebuffer, then
-`fbo.read` hands back rows bottom-up, so `OverviewMap.pixels` is GL-order (row 0 =
-south). mapview.py reasons in **top-down uv** — (0,0) is north-west, which is what
-`uv_to_lonlat` expects — and `MAPVIEW_FS` flips `v` on the texture lookup to reconcile
-the two. Get this wrong and the map is mirrored north-south, which looks plausible until
-you notice the Elbe is on the wrong side.
+**Map orientation is a third coordinate convention, and it flips three times.**
+overview.py bakes with a *negative* y scale so north (−z) lands at the top of the
+framebuffer, then `fbo.read` hands back rows bottom-up, so `OverviewMap.pixels` is
+GL-order (row 0 = south). mapview.py reasons in **top-down uv** — (0,0) is north-west,
+which is what `uv_to_lonlat` expects, and what pygame's mouse y already agrees with. So
+the picker's two shaders each flip once: `MAPVIEW_VS` flips uv y into clip space (where
++1 is up), and `MAPVIEW_FS` flips `v` again on the texture lookup, because the texture is
+stored bottom-up. Miss the vertex-stage flip and *both* the map and the selection square
+are mirrored north-south — the square visibly chases the cursor the wrong way, but the
+map alone looks plausible until you notice the Elbe is on the wrong side.
+
+The invariant to test is that the pixel drawn at a screen position is the map pixel
+`MapView.screen_to_uv` says is there. Sampling the framebuffer against
+`OverviewMap.pixels` at a few zoom levels catches every sign error in the chain at once,
+which eyeballing the map does not.
 
 **Coordinates.** `Projection.forward` gives x = east, z = **south** (north is −z), y = up.
 Every `Scene` array is `(x, z)` 2D; build.py lifts it to `(x, y, z)`. Camera yaw 0 looks

@@ -255,7 +255,11 @@ uniform vec4 u_view;          // (scale_x, scale_y, offset_x, offset_y)
 out vec2 v_uv;
 void main() {
     v_uv = in_pos * u_view.xy + u_view.zw;
-    gl_Position = vec4(in_pos * 2.0 - 1.0, 0.0, 1.0);
+    // in_pos.y = 0 is the *north* edge of v_uv, and north belongs at the top
+    // of the window — so flip into clip space, where +1 is up. Without this
+    // the map is upside down and the selection square chases the cursor in
+    // the wrong direction.
+    gl_Position = vec4(in_pos.x * 2.0 - 1.0, 1.0 - in_pos.y * 2.0, 0.0, 1.0);
 }
 """
 
