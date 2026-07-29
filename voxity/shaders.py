@@ -246,9 +246,10 @@ out vec4 f_color;
 void main() { f_color = vec4(v_col, 1.0); }
 """
 
-# Viewing the baked map: a textured quad with pan/zoom, plus the selection
-# square drawn in the same pass — a screen-space border test is cheaper than a
-# second VAO and keeps the outline exactly one pixel band wide at any zoom.
+# Viewing the baked map: a textured quad with pan/zoom, plus the region grid
+# and the selected cell drawn in the same pass — screen-space distance tests
+# are cheaper than a second VAO and keep every line exactly one pixel band
+# wide at any zoom, however many thousand cells the grid has.
 MAPVIEW_VS = """#version 330 core
 in vec2 in_pos;
 uniform vec4 u_view;          // (scale_x, scale_y, offset_x, offset_y)
@@ -267,9 +268,12 @@ MAPVIEW_FS = """#version 330 core
 in vec2 v_uv;
 out vec4 f_color;
 uniform sampler2D u_tex;
-uniform vec4 u_sel;           // selection in uv space (x0, y0, x1, y1)
+uniform vec4 u_sel;           // selected cell in uv space (x0, y0, x1, y1)
 uniform vec2 u_border;        // border half-thickness in uv
 uniform vec3 u_edge_col;
+uniform vec4 u_grid;          // (cell_u, cell_v, origin_u, origin_v)
+uniform vec2 u_grid_n;        // cells across and down
+uniform float u_grid_alpha;   // 0 when cells are too small to be worth drawing
 void main() {
     vec3 col;
     if (min(v_uv.x, v_uv.y) < 0.0 || max(v_uv.x, v_uv.y) > 1.0) {
@@ -278,6 +282,16 @@ void main() {
         // v_uv has v=0 at north, which is how the picker reasons about the
         // map; the texture itself is stored bottom-up, so flip on lookup
         col = texture(u_tex, vec2(v_uv.x, 1.0 - v_uv.y)).rgb;
+    }
+
+    // the region grid: distance to the nearest cell boundary, per axis
+    vec2 g = (v_uv - u_grid.zw) / u_grid.xy;
+    if (u_grid_alpha > 0.0 && all(greaterThanEqual(g, vec2(0.0)))
+                           && all(lessThanEqual(g, u_grid_n))) {
+        vec2 f = abs(fract(g) - 0.5);
+        vec2 d = (0.5 - f) * u_grid.xy;        // uv distance to a gridline
+        if (d.x < u_border.x || d.y < u_border.y)
+            col = mix(col, vec3(0.20, 0.21, 0.24), u_grid_alpha);
     }
 
     bool inside = v_uv.x > u_sel.x && v_uv.x < u_sel.z &&

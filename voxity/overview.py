@@ -78,10 +78,6 @@ class OverviewMap:
         return ((float(p[0]) - minx) / (maxx - minx),
                 (float(p[1]) - minz) / (maxz - minz))
 
-    def metres_to_uv(self, metres):
-        """Edge length in metres as a fraction of the map's width."""
-        return metres / (self.extent[2] - self.extent[0])
-
 
 # --- geometry accumulation --------------------------------------------------
 

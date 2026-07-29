@@ -69,7 +69,8 @@ def parse_args(argv=None):
     g.add_argument('--place', help='named preset (see --list-places)')
     g.add_argument('--bbox', help='W,S,E,N in degrees (overrides --size)')
     p.add_argument('--size', type=float, default=1200.0,
-                   help='edge length of the square in metres (default 1200)')
+                   help='edge length of the square in metres, and of the '
+                        'map picker\'s grid cells (default 1200)')
     p.add_argument('--width', type=int, default=1600)
     p.add_argument('--height', type=int, default=950)
     p.add_argument('--sun', default='235,34', help='AZIMUTH,ELEVATION in degrees')

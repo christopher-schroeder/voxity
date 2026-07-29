@@ -28,13 +28,19 @@ The map frames itself on the data rather than on the file's header box. Geofabri
 Hamburg extract reaches 100 km west to take in the Neuwerk exclave, and honouring
 that would put the city in a corner of an otherwise empty image.
 
+The map is divided into a grid of equal squares and you pick one of them, rather
+than placing a rectangle freehand. Every region is therefore the same size, and
+any two are either identical or don't overlap at all — so a square you played
+before is the same square when you come back to it, cache and all. `--size` sets
+the edge length, and with it the grid: 1200 m gives Hamburg 31 × 30 cells.
+
 | | |
 |---|---|
-| move mouse | place the square |
-| wheel | square size (200 m – 8 km) |
-| `ctrl`+wheel, `+` `-` | zoom the map |
-| right-drag, arrows | pan |
-| click, `ENTER` | play here |
+| move mouse | highlight the cell under the cursor |
+| arrows | move one cell (the view follows) |
+| wheel, `+` `-` | zoom the map |
+| right-drag | pan |
+| click, `ENTER` | play the highlighted cell |
 | `ESC` | quit |
 
 In the city, `M` takes you back to the map to pick somewhere else.
@@ -94,7 +100,7 @@ built-in `--place` presets are all Hamburg.
 --place NAME      named preset         (--list-places to see them)
 --center LAT,LON  centre of the square
 --bbox W,S,E,N    explicit box in degrees
---size METRES     edge length of the square (default 1200)
+--size METRES     edge length of the square, and of the grid cells (default 1200)
 --sun AZ,EL       sun azimuth/elevation in degrees (default 235,34)
 --view YAW,PITCH,ALT   starting camera
 --width --height  window size

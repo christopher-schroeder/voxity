@@ -170,7 +170,13 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   `bake` streams triangles through `_Batch`. Needs a live GL context, so it is imported
   lazily; `--build-map` bakes it headlessly through the same EGL path as `--screenshot`.
 - **voxity/mapview.py** — the region picker. Owns its own event loop, returns a lon/lat
-  box, and knows nothing about how the map was made.
+  box, and knows nothing about how the map was made. Regions are a **fixed grid**, not a
+  freely placed rectangle: `MapView` divides `omap.extent` into `--size`-metre cells,
+  centred so the remainder is split between both edges, and you select one by index.
+  Cell size is fixed for the life of the picker, so `count`/`origin`/`cell` are computed
+  once in `__init__` — anything that changes `size_m` later has to recompute all three.
+  The grid and the selected cell are drawn by `MAPVIEW_FS` from uniforms, not as
+  geometry, so a 31 × 30 grid costs no more than a 1 × 1 one.
 
 ## Conventions that cut across files
 
