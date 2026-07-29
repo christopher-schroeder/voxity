@@ -1,7 +1,8 @@
 """Turn extracted OSM features into GPU-ready triangle soup.
 
 Vertex layout: position(3f) normal(3f) colour(3f) material(1f).
-Material 0 = matte, 1 = water (specular + ripple), 2 = foliage.
+Material 0 = matte, 1 = water (specular + ripple). Foliage never reaches this
+buffer — trees are instanced through their own program in renderer.py.
 """
 
 import numpy as np

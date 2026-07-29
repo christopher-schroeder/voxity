@@ -16,6 +16,12 @@ built from the filename. Any other `--pbf` needs an explicit `--pbf-url`.
 
 ## Running
 
+**`./env` is gitignored, so a fresh clone does not have one** and every command below
+fails with "No such file or directory" until it is built. The README's Setup block is
+the source of truth; the short form is `conda create -p ./env python=3.12`,
+`conda install -p ./env -c conda-forge poetry`, `./env/bin/poetry install`. Check with
+`ls -d env` before concluding anything else is broken.
+
 The environment is `./env`, a **conda environment** with Poetry installed inside it and
 the project installed **editable** into that same environment:
 
@@ -51,16 +57,25 @@ virtualenv detection looks for — hence `extend-exclude = ["env"]` in `pyprojec
 Drop it and `ruff check .` lints the entire environment (~17k findings). Any other tool
 that walks the tree needs the same treatment.
 
-**The windowed path needs two GL symlinks that are not in any manifest.**
-`moderngl.create_context()` `dlopen`s the unversioned `libEGL.so`/`libGL.so`; this
-Fedora/Bazzite host has only the versioned `.so.1` (no `-devel` packages), so the run
-dies at `create_context()` — *after* extract and mesh, which makes it look like a
-renderer bug. `env/lib/libGL.so` and `env/lib/libEGL.so` symlink the system libraries
-in; `env/lib` is already on the dlopen path via conda's `RUNPATH`, so no
-`LD_LIBRARY_PATH` is involved. Recreating `./env` drops them — re-add them (see README).
-They must point at the **system** libs, since SDL makes the context against the system
-driver; conda-forge `mesa`/`libglvnd` in `./env` would shadow it. `--screenshot` never
-hits this, so headless smoke tests pass while the window is broken — check both.
+**The windowed path may need two GL symlinks that are not in any manifest — check the
+host first.** `moderngl.create_context()` `dlopen`s the *unversioned* `libEGL.so` /
+`libGL.so`. Whether those exist is a property of the machine, not of this project:
+
+```
+ls /usr/lib*/libGL.so /usr/lib*/libEGL.so   # present on Arch/Manjaro (mesa ships them)
+```
+
+If they are there, nothing is needed. Fedora-family hosts (Bazzite and other rpm-ostree
+images included) ship only the versioned `.so.1` — the unversioned names come from
+`-devel` packages — and the run then dies at `create_context()` *after* extract and mesh,
+which makes it look like a renderer bug. The fix is `env/lib/libGL.so` and
+`env/lib/libEGL.so` symlinked to whatever the host's real `.so.1` files are (`/usr/lib`
+on Arch, `/usr/lib64` on Fedora — the README's paths are Fedora's). `env/lib` is already
+on the dlopen path via conda's `RUNPATH`, so no `LD_LIBRARY_PATH` is involved, and
+recreating `./env` drops them. They must point at the **system** libs, since SDL makes
+the context against the system driver; conda-forge `mesa`/`libglvnd` in `./env` would
+shadow it. `--screenshot` never hits this, so headless smoke tests pass while the window
+is broken — check both.
 
 `main.py` is a top-level module, not part of the `osmcity` package, so `pyproject.toml`
 lists it explicitly under `[tool.poetry] packages` alongside `osmcity`. A new top-level
@@ -68,16 +83,30 @@ module would need the same treatment.
 
 ### Smoke tests
 
-There are no unit tests. The two ways to verify a change without a human at the keyboard:
+There are no unit tests. Three ways to verify a change without a human at the keyboard,
+cheapest first:
 
 ```
-./env/bin/osm-city --place rathaus --size 600 --frames 3      # window, quits after 3 frames
+# 1. pipeline only, no GL at all — the right check for tags/extract/build edits
+./env/bin/python -c "from osmcity import extract; from osmcity.build import build_scene; \
+from osmcity.geo import square_bbox; \
+print(build_scene(extract.load('hamburg-260728.osm.pbf', \
+square_bbox(9.9937, 53.5503, 600)))[0].shape)"
+
+# 2. one frame through a standalone EGL context, headless
 ./env/bin/osm-city --place rathaus --size 600 --screenshot out.png
+
+# 3. the real window, quits by itself
+./env/bin/osm-city --place rathaus --size 600 --frames 3
 ```
 
-`--screenshot` renders one frame through a standalone EGL context, so it works headless;
-it is the only check that exercises the shaders without a display. `--no-cache` forces a
-full re-extract (~15 s for the Hamburg pbf) when you need to test the cold path.
+(1) works because `main.run` and `main.render_headless` import moderngl and pygame
+*inside* the function — extract and build never touch GL, so this still passes when the
+GL symlinks above are missing, which is what distinguishes a mesh bug from a context
+bug. (2) is the only check that exercises the shaders without a display; note it renders
+with `dt=0`, so `u_time` stays 0 and the water ripple is frozen, and it ignores
+`--frames`. `--no-cache` forces a full re-extract (~15 s for the Hamburg pbf) when you
+need to test the cold path.
 
 ## Pipeline
 
@@ -95,6 +124,8 @@ lon/lat, and renderer.py never sees OSM tags.
 - **osmcity/extract.py** — one `osmium.FileProcessor` pass with C++-side key filters,
   plus Python-side coarse rejection (`_coarse_reject_*`, sampling 2–3 nodes against a
   padded bbox) because materialising every ring of a city extract is the bottleneck.
+  `KEYS` selects which **objects** survive the filter — it does not strip tags, so a
+  kept object arrives with its full tag dict.
 - **osmcity/geo.py** — `Projection` (equirectangular around the box centre) and the
   Sutherland-Hodgman / Liang-Barsky clippers.
 - **osmcity/build.py** — `MeshBuilder` accumulates triangle soup; `build_scene` draws
@@ -112,16 +143,27 @@ north. Get this backwards and the city mirrors.
 
 **Vertex layout.** `3f 3f 3f 1f` = position, normal, colour, material — declared in
 `MeshBuilder.pack`, consumed by `Renderer.scene_vao`, read by `SCENE_VS`. Material 0 is
-matte, 1 is water (ripple normal + specular in `SCENE_FS`). Trees are a separate program
-and buffer entirely (`tree_mesh` + per-instance `x, z, height, radius, tint`), so the
-material slot never sees foliage. Changing the layout means touching all three places,
+matte, 1 is water (ripple normal + specular in `SCENE_FS`); those are the only two, and
+`SCENE_FS` branches on `v_mat > 0.5`, so any third material added later renders as water
+until that test is replaced. Trees are a separate program and buffer entirely
+(`tree_mesh` + per-instance `x, z, height, radius, tint`), so the material slot never
+sees foliage. Changing the layout means touching all three places,
 plus the `'3f 28x'` stride in `scene_depth_vao`.
 
-**Two cache versions, and they are separate.** `extract.CACHE_VERSION` keys the pickled
-`Scene`; `main.MESH_VERSION` keys the `.npz` mesh. Bump `CACHE_VERSION` when extraction
-or `tags.py` changes what lands in a `Scene`; bump `MESH_VERSION` when `build.py` changes
-geometry. Forgetting means stale `cache/*.pkl` or `cache/*.npz` silently masks your edit —
-if a change "does nothing", suspect this first. Deleting `cache/` is always safe.
+**Two cache versions, and they are not symmetric.** `extract.CACHE_VERSION` keys the
+pickled `Scene`; `main.MESH_VERSION` keys the `.npz` mesh. Bump `CACHE_VERSION` when
+extraction or `tags.py` changes what lands in a `Scene`; bump `MESH_VERSION` when
+`build.py` changes geometry. The mesh filename is built from `extract.cache_key(...)`
+*plus* `MESH_VERSION`, and `cache_key` already folds in `CACHE_VERSION` — so bumping
+`CACHE_VERSION` invalidates **both** caches, while `MESH_VERSION` invalidates only the
+`.npz`. `cache_key` also folds in the pbf's size and mtime, so a re-downloaded extract
+invalidates everything on its own. Forgetting a bump means a stale `cache/*.pkl` or
+`cache/*.npz` silently masks your edit — if a change "does nothing", suspect this first.
+Deleting `cache/` is always safe.
+
+`--no-trees` is applied *after* the mesh cache is read (`main.prepare` slices `trees` to
+length zero), so trees are always meshed and stored: changing tree geometry still needs a
+`MESH_VERSION` bump, but toggling the flag never does.
 
 **Flat geometry is stacked, not depth-tested apart.** Ground layers sit at
 `layer * LAYER_STEP` (0.15 m); the `layer` number comes from the `ROADS`/`SURFACES` tables
@@ -146,8 +188,11 @@ invalidate `Renderer._shadow_key`.
 
 1. Add the tag → value entry in `tags.py` (`ROADS`/`SURFACES` + `_SURFACE_RULES`/etc.),
    including its layer and colour.
-2. If it needs a tag key not already in `extract.KEYS`, add it there — the osmium filter
-   drops everything else in C++ before Python sees it.
+2. Only if the feature is *identified* by a key no kept object would already carry, add
+   that key to `extract.KEYS` — the osmium `KeyFilter` drops objects carrying none of
+   them in C++ before Python sees it. Tags read as *attributes* of an already-kept object
+   need no change: `tunnel`, `bridge`, `layer`, `height`, `building:levels`, `lanes`,
+   `width` and the colour tags are all absent from `KEYS` and work fine.
 3. Route it in `extract._area` or `extract._way` if it isn't already covered by
    `surface_class` / the `ROADS`-`RAILS`-`WATERWAYS` lookup.
 4. Bump `CACHE_VERSION` (and `MESH_VERSION` if build.py changed), then verify with
