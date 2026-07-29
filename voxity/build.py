@@ -1,12 +1,15 @@
 """Turn extracted OSM features into GPU-ready triangle soup.
 
-Vertex layout: position(3f) normal(3f) colour(3f) material(1f).
-Material 0 = matte, 1 = water (specular + ripple). Foliage never reaches this
-buffer — trees are instanced through their own program in renderer.py.
+The vertex layout and `MeshBuilder` live in mesh.py, shared with voxel.py so
+extruded footprints and voxel models land in the same buffer. Only matte and
+water come out of here; foliage never reaches this buffer at all — trees are
+instanced through their own program in renderer.py.
 """
 
 import numpy as np
 from mapbox_earcut import triangulate_float32
+
+from .mesh import MAT_MATTE, MAT_WATER, MeshBuilder, orient_triangles
 
 
 LAYER_STEP = 0.15      # vertical spacing between flat ground layers
@@ -14,67 +17,6 @@ CASING_DROP = 0.06
 GROUND_COLOUR = (0.30, 0.31, 0.28)
 SURROUND_COLOUR = (0.27, 0.29, 0.26)
 UP = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-
-
-class MeshBuilder:
-    def __init__(self):
-        self._pos = []
-        self._nrm = []
-        self._col = []
-        self._mat = []
-        self.count = 0
-
-    def add(self, pos, nrm, col, mat):
-        """Append triangles, re-winding each one to agree with its normal."""
-        n = len(pos)
-        if n == 0:
-            return
-        pos = np.array(pos, dtype=np.float32, copy=True)
-        nrm = np.asarray(nrm, dtype=np.float32)
-        col = np.asarray(col, dtype=np.float32)
-        if nrm.ndim == 1:
-            nrm = np.tile(nrm, (n, 1))
-        else:
-            nrm = np.array(nrm, dtype=np.float32, copy=True)
-        if col.ndim == 1:
-            col = np.tile(col, (n, 1))
-        else:
-            col = np.array(col, dtype=np.float32, copy=True)
-
-        tp, tn, tc = (a.reshape(-1, 3, 3) for a in (pos, nrm, col))
-        face = np.cross(tp[:, 1] - tp[:, 0], tp[:, 2] - tp[:, 0])
-        flip = (face * tn[:, 0]).sum(axis=1) < 0.0
-        if flip.any():
-            order = [0, 2, 1]
-            tp[flip] = tp[flip][:, order]
-            tn[flip] = tn[flip][:, order]
-            tc[flip] = tc[flip][:, order]
-
-        self._pos.append(np.ascontiguousarray(pos))
-        self._nrm.append(np.ascontiguousarray(nrm))
-        self._col.append(np.ascontiguousarray(col))
-        self._mat.append(np.full((n, 1), mat, dtype=np.float32))
-        self.count += n
-
-    def pack(self):
-        if not self._pos:
-            return np.zeros((0, 10), dtype=np.float32)
-        return np.hstack([np.concatenate(self._pos),
-                          np.concatenate(self._nrm),
-                          np.concatenate(self._col),
-                          np.concatenate(self._mat)]).astype(np.float32)
-
-
-def orient_triangles(pos, nrm):
-    """Re-wind triangles so their face normal agrees with the shading normal."""
-    tp = pos.reshape(-1, 3, 3)
-    tn = nrm.reshape(-1, 3, 3)
-    face = np.cross(tp[:, 1] - tp[:, 0], tp[:, 2] - tp[:, 0])
-    flip = (face * tn[:, 0]).sum(axis=1) < 0.0
-    if flip.any():
-        tp[flip] = tp[flip][:, [0, 2, 1]]
-        tn[flip] = tn[flip][:, [0, 2, 1]]
-    return pos, nrm
 
 
 def _dedup_ring(ring):
@@ -122,7 +64,7 @@ def _jitter(seed, amount=0.06):
     return 1.0 + ((h >> 8 & 0xFFFF) / 65535.0 - 0.5) * 2.0 * amount
 
 
-def _flat(mb, tri2d, y, rgb, mat=0.0):
+def _flat(mb, tri2d, y, rgb, mat=MAT_MATTE):
     pos = np.empty((len(tri2d), 3), dtype=np.float32)
     pos[:, 0] = tri2d[:, 0]
     pos[:, 1] = y
@@ -164,7 +106,7 @@ def ribbon(pts, width):
     return pts + off, pts - off
 
 
-def _add_ribbon(mb, pts, width, y, rgb, mat=0.0):
+def _add_ribbon(mb, pts, width, y, rgb, mat=MAT_MATTE):
     r = ribbon(pts, width)
     if r is None:
         return
@@ -253,13 +195,13 @@ def _gable_roof(mb, box, top, height, colour):
 
     for tri, n in (((a, b, r1), near), ((a, r1, r0), near),
                    ((d, r0, r1), far), ((d, r1, c), far)):
-        mb.add(np.array(tri, dtype=np.float32), n, colour * 1.06, 0.0)
+        mb.add(np.array(tri, dtype=np.float32), n, colour * 1.06, MAT_MATTE)
 
     gable = colour * 0.9
     for tri, sgn in (((a, r0, d), -1.0), ((b, c, r1), 1.0)):
         pos = np.array(tri, dtype=np.float32)
         n = np.array([u[0] * sgn, 0.0, u[1] * sgn], dtype=np.float32)
-        mb.add(pos, n, gable, 0.0)
+        mb.add(pos, n, gable, MAT_MATTE)
 
 
 PART_INSET = 0.25          # metres a building:part is pulled in from its parent
@@ -342,7 +284,7 @@ def _add_building(mb, b):
         # fake contact shading: darker where the wall meets the ground
         shade = np.array([0.62, 0.62, 1.0, 0.62, 1.0, 1.0], dtype=np.float32)
         col = (wall[None, None, :] * shade[None, :, None]).repeat(m, axis=0)
-        mb.add(v.reshape(-1, 3), nrm, col.reshape(-1, 3), 0.0)
+        mb.add(v.reshape(-1, 3), nrm, col.reshape(-1, 3), MAT_MATTE)
 
 
 # --- trees ------------------------------------------------------------------
@@ -423,7 +365,7 @@ def build_scene(scene, seed=7, verbose=True):
         y = ln['layer'] * LAYER_STEP + ln['elev']
         rgb = np.array(ln['rgb'], dtype=np.float32)
         if ln['kind'] == 'water':
-            _add_ribbon(mb, ln['pts'], ln['width'], y, rgb, 1.0)
+            _add_ribbon(mb, ln['pts'], ln['width'], y, rgb, MAT_WATER)
             continue
         if ln['width'] >= 4.0:
             _add_ribbon(mb, ln['pts'], ln['width'] + 1.4, y - CASING_DROP, rgb * 0.6)

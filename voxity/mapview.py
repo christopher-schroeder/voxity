@@ -177,15 +177,21 @@ class MapView:
 
 def choose_region(ctx, omap, screen_size, overlay, help_overlay,
                   size_m=1200.0, clock=None, frames=0):
-    """Run the picker. Returns (bbox_ll, size_m) or None if the player quit.
+    """Run the picker.
 
-    `frames` quits after that many frames without a choice — for smoke tests.
+    Returns `(bbox_ll, size_m)` for a pick, or the string 'menu' (ESC, back to
+    the start screen) or 'quit' (the window was closed). Callers tell the two
+    apart with `isinstance(picked, str)`.
+
+    `frames` gives up after that many frames without a choice — for smoke
+    tests, and it reports 'menu' so the caller unwinds the same way ESC does.
     """
     view = MapView(ctx, omap, size_m)
     clock = clock or pygame.time.Clock()
     panning = False
     frame = 0
     result = None
+    outcome = 'menu'
 
     pygame.mouse.set_visible(True)
     pygame.event.set_grab(False)
@@ -199,6 +205,7 @@ def choose_region(ctx, omap, screen_size, overlay, help_overlay,
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                outcome = 'quit'
                 running = False
             elif event.type == pygame.VIDEORESIZE:
                 size = (max(320, event.w), max(240, event.h))
@@ -261,6 +268,6 @@ def choose_region(ctx, omap, screen_size, overlay, help_overlay,
 
     view.release()
     if result is None:
-        return None
+        return outcome
     lon, lat = result
     return square_bbox(lon, lat, view.size_m), view.size_m

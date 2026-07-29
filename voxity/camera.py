@@ -1,4 +1,4 @@
-"""Matrix helpers and a free-flying camera."""
+"""Matrix helpers and the two cameras: fly (city) and orbit (editor)."""
 
 import math
 
@@ -50,6 +50,26 @@ def look_at(eye, target, up=(0.0, 1.0, 0.0)):
     m[1, 3] = -u.dot(eye)
     m[2, 3] = f.dot(eye)
     return m
+
+
+def unproject(inv_vp, x, y, z):
+    """NDC point back to world space through an already-inverted view-projection."""
+    p = inv_vp @ np.array([x, y, z, 1.0])
+    return p[:3] / p[3]
+
+
+def screen_ray(inv_vp, pos, size):
+    """World-space (origin, direction) ray through a screen pixel.
+
+    `pos` is in pygame's window coordinates — origin top-left, y down.
+    """
+    x = 2.0 * pos[0] / max(size[0], 1) - 1.0
+    y = 1.0 - 2.0 * pos[1] / max(size[1], 1)
+    near = unproject(inv_vp, x, y, -1.0)
+    far = unproject(inv_vp, x, y, 1.0)
+    d = far - near
+    n = np.linalg.norm(d)
+    return near, (d / n if n > 1e-12 else d)
 
 
 class Camera:
@@ -114,3 +134,53 @@ class Camera:
             altitude = max(1.0, 0.4 + self.pos[1] / 90.0)
             self.pos += move / norm * self.speed * boost * slow * altitude * dt
         self.pos[1] = max(1.5, self.pos[1])
+
+
+class OrbitCamera:
+    """Turntable camera for the editor: orbit, pan and zoom around a target.
+
+    Same `view()` / `projection()` interface as the fly Camera, so both go
+    through the same `look_at` and `perspective` helpers. The eye position is
+    the closed form of the editor's original translate/rotate/rotate/translate
+    modelview, which is why yaw and pitch still turn the way they always did.
+    """
+
+    def __init__(self, target=(0.0, 0.5, 0.0), yaw=45.0, pitch=30.0,
+                 distance=22.0, fov=60.0):
+        self.target = np.array(target, dtype=np.float64)
+        self.yaw = yaw
+        self.pitch = pitch
+        self.distance = distance
+        self.fov = fov
+        self.near = 0.1
+        self.far = 500.0
+
+    @property
+    def pos(self):
+        cy, sy = math.cos(math.radians(self.yaw)), math.sin(math.radians(self.yaw))
+        cp, sp = math.cos(math.radians(self.pitch)), math.sin(math.radians(self.pitch))
+        return self.target + self.distance * np.array([-cp * sy, sp, cp * cy])
+
+    def view(self):
+        return look_at(self.pos, self.target)
+
+    def projection(self, aspect):
+        return perspective(self.fov, aspect, self.near, self.far)
+
+    def _basis(self):
+        """World-space right/up vectors of the camera, for panning."""
+        cy, sy = math.cos(math.radians(self.yaw)), math.sin(math.radians(self.yaw))
+        cp, sp = math.cos(math.radians(self.pitch)), math.sin(math.radians(self.pitch))
+        return np.array([cy, 0.0, sy]), np.array([sy * sp, cp, -cy * sp])
+
+    def orbit(self, dx, dy):
+        self.yaw += dx * 0.3
+        self.pitch = max(-89.0, min(89.0, self.pitch + dy * 0.3))
+
+    def pan(self, dx, dy):
+        right, up = self._basis()
+        f = self.distance * 0.0015
+        self.target = self.target - right * dx * f + up * dy * f
+
+    def zoom(self, notches):
+        self.distance = max(2.0, min(120.0, self.distance * (0.9 ** notches)))

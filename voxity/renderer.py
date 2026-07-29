@@ -57,6 +57,12 @@ class Renderer:
         self.shadows = True
         self.show_trees = True
         self.time = 0.0
+        # Edge length of one voxel, for anything in the buffer carrying
+        # MAT_VOXEL. One uniform for the whole scene, so every voxel model in a
+        # city has to be meshed at the same cell size — pass the same value to
+        # `voxel.mesh_vertices(scale=...)` that you set here or the mosaic
+        # stops lining up with the geometry.
+        self.voxel_cell = 1.0
 
         self.scene_prog = ctx.program(vertex_shader=shaders.SCENE_VS,
                                       fragment_shader=shaders.SCENE_FS)
@@ -160,6 +166,7 @@ class Renderer:
         _set(prog, 'u_shadow', 0)
         _set(prog, 'u_shadow_texel', (1.0 / SHADOW_SIZE, 1.0 / SHADOW_SIZE))
         _set(prog, 'u_light_vp', to_gl(self.light_vp))
+        _set(prog, 'u_voxel_cell', self.voxel_cell)
 
     # -- passes --------------------------------------------------------------
 

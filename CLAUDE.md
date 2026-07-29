@@ -4,11 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-binary-ish Python app that reads a square out of an `.osm.pbf` extract, turns
-OSM features into triangles, and flies a camera through them with moderngl. Launched
-without a region it first shows a flat 2D map of the whole extract and lets you pick the
-square to play on. No test suite — just `main.py` and the `voxity/` package, Poetry for
-dependencies, and git (`origin` is `github.com:christopher-schroeder/voxity`).
+A single-binary-ish Python app with **two tools sharing one window and one GL context**:
+a city that reads a square out of an `.osm.pbf` extract, turns OSM features into
+triangles and flies a camera through them; and a **voxel editor** for the models the
+city is made of. Launched bare it shows a start screen and you pick one. The city path
+then shows a flat 2D map of the whole extract to pick the square to play on. No test
+suite — just `main.py` and the `voxity/` package, Poetry for dependencies, and git
+(`origin` is `github.com:christopher-schroeder/voxity`).
+
+The editor was a separate project (`voxelforge`, PyOpenGL fixed-function) and was merged
+in. It is **ported**, not vendored: it runs on the same core 3.3 context as the city, so
+there is no fixed-function code anywhere and no PyOpenGL dependency. What survived
+unchanged is the part that matters — the palette, the greedy mesher and the per-cell
+brightness hash, now in `voxity/voxel.py` where both halves can reach them.
 
 `.osm.pbf` extracts are **not** in the repo (`.gitignore`), nor is `cache/` or `env/`.
 `main.ensure_pbf` fetches the default extract from Geofabrik on first run, so a fresh
@@ -27,17 +35,23 @@ The environment is `./env`, a **conda environment** with Poetry installed inside
 the project installed **editable** into that same environment:
 
 ```
-./env/bin/voxity                                # map first, then pick a square
+./env/bin/voxity                                # start screen, then map, then play
 ./env/bin/voxity --place rathaus --size 1200    # straight into the city
 ./env/bin/voxity --center 53.5503,9.9937 --size 2000
 ./env/bin/voxity --no-map                       # skip the picker, default square
+./env/bin/voxity --editor                       # straight into the voxel editor
 ./env/bin/voxity --list-places                  # 14 Hamburg presets in main.py
 ```
 
-**A region argument suppresses the map.** `--place`/`--center`/`--bbox` (and
-`--screenshot`, which has nobody to click) go straight to the old direct path, so every
-scripted invocation behaves exactly as it did before the picker existed. Only the
-bare-argument case changed, and it used to default to `rathaus`.
+**Naming a tool suppresses everything before it.** `--place`/`--center`/`--bbox`,
+`--no-map` and `--screenshot` (which has nobody to click) go straight to the direct city
+path; `--editor` goes straight to the editor. `main.run_windowed` calls this `forced`,
+and a forced run does exactly one pass and exits rather than falling back to the menu, so
+every scripted invocation behaves as it always did. Only the bare-argument case changed.
+
+**`--frames` also terminates the loop after one pass**, for the same reason: every stage
+(start screen, picker, fly, editor) gives up after N frames by handing control *back*, so
+without that check `--frames 3` would cycle for ever.
 
 `voxity` is a console script pointing at `main:main`; `./env/bin/python main.py ...`
 is equivalent. The **system** `python3` does *not* have moderngl — always go through
@@ -110,12 +124,18 @@ square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 # 4. bake the overview map headlessly (EGL, no display needed)
 ./env/bin/voxity --build-map --map-size 512
 
-# 5. the map-first startup: picker for 3 frames, then quits
+# 5. the whole chain: start screen, then picker, 3 frames each, then quits
 ./env/bin/voxity --frames 3
+
+# 6. the editor's 3D view and voxel shader, headless (EGL, no display)
+./env/bin/voxity --editor --screenshot forge.png
+
+# 7. the editor in the real window, quits by itself
+./env/bin/voxity --editor --frames 3
 ```
 
-(1) works because `main.run` and `main.render_headless` import moderngl and pygame
-*inside* the function — extract and build never touch GL, so this still passes when the
+(1) works because `main.run_windowed` and `main.render_headless` import moderngl and
+pygame *inside* the function — extract and build never touch GL, so this still passes when the
 GL symlinks above are missing, which is what distinguishes a mesh bug from a context
 bug. (2) is the only check that exercises the shaders without a display; note it renders
 with `dt=0`, so `u_time` stays 0 and the water ripple is frozen, and it ignores
@@ -129,15 +149,37 @@ have to `pygame.event.post` a `MOUSEBUTTONDOWN` before calling `mapview.choose_r
 then drive `main.fly` the same way. Worth doing — it is the only check that the uv →
 lon/lat → bbox chain comes out the right size and in the right hemisphere.
 
+(6) is the cheap voxel check but it draws no UI, so ui.py is untested by it. To see the
+editor's chrome or the start screen without a human, wrap `pygame.display.flip` to read
+`ctx.screen` *before* it swaps (afterwards the back buffer is undefined) and call
+`startscreen.choose` / `editor.run` with `frames=`.
+
+The invariant worth testing on the voxel side is that the shader's mosaic agrees with
+`voxel.value_for_cell` on the CPU. Mesh a flat single-hue wall — it greedy-merges to one
+quad, so every brightness square on it comes from the shader alone — then sample the
+middle of each cell and compare with `color_rgb(hue, value_for_cell(cell))` times
+`face_brightness(normal)`. Do it once at large negative coordinates too: that is where
+GLSL's 32-bit multiply wraps and Python's does not, and the bitmask is what makes them
+agree anyway.
+
 ## Pipeline
 
-There are **two** pipelines over the same `.osm.pbf`, and they share only tags.py and
-geo.py:
+There are **three** pipelines. Two run over the `.osm.pbf` and share only tags.py and
+geo.py; the third has nothing to do with OSM at all and meets the first one at the
+vertex buffer:
 
 ```
-play:  .osm.pbf → extract.py → Scene → build.py → (verts, trees) → renderer.py → GL
-map:   .osm.pbf → overview.py ─────────────────────────────────→ PNG → mapview.py → GL
+play:   .osm.pbf → extract.py → Scene → build.py ─┐
+map:    .osm.pbf → overview.py ────────────────── │ → PNG → mapview.py → GL
+voxel:  models/*.json → voxel.py ─────────────────┴→ (verts, trees) → renderer.py → GL
+                                 └→ editor/render.py → GL   (the editor's own view)
 ```
+
+The voxel pipeline exists twice on purpose. `voxel.mesh_vertices` emits the **shared
+layout from mesh.py**, so a model can go into a city's buffer and be lit by its sun and
+shadow map (`MAT_VOXEL`, see below); `editor/render.py` draws the very same buffer with
+its own flat program instead, because in the editor a hue on screen must be the hue in
+the palette — no shadows, no fog, no tone mapping.
 
 The play pipeline is the original one: a 1 km-ish square, extruded and lit. Each stage's
 output is the next stage's only input; `Scene` (extract.py) is the seam. Everything in a
@@ -159,16 +201,32 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   kept object arrives with its full tag dict.
 - **voxity/geo.py** — `Projection` (equirectangular around the box centre) and the
   Sutherland-Hodgman / Liang-Barsky clippers.
-- **voxity/build.py** — `MeshBuilder` accumulates triangle soup; `build_scene` draws
-  ground skirt → surfaces (by layer) → lines (by elev, layer) → buildings.
+- **voxity/mesh.py** — the vertex layout, `MeshBuilder`, and the `MAT_*` constants.
+  Owned by neither producer, because build.py and voxel.py both feed it.
+- **voxity/build.py** — `build_scene` draws ground skirt → surfaces (by layer) → lines
+  (by elev, layer) → buildings, through `MeshBuilder`.
 - **voxity/renderer.py** + **shaders.py** — shadow pass, scene pass, instanced trees,
   fullscreen sky. GLSL lives as strings in shaders.py, sharing a `COMMON_LIGHTING` chunk.
-- **voxity/camera.py** — matrix helpers (`perspective`, `ortho`, `look_at`, `to_gl`) and
-  the fly camera. **voxity/hud.py** — pygame-rendered text uploaded as a GL texture.
+- **voxity/camera.py** — matrix helpers (`perspective`, `ortho`, `look_at`, `to_gl`),
+  the fly camera, the editor's `OrbitCamera`, and `screen_ray` (the replacement for
+  `gluUnProject`, which core profile does not have). **voxity/hud.py** — pygame-rendered
+  text panels uploaded as a GL texture. **voxity/ui.py** — flat 2D widgets (rects,
+  outlines, cached text, `Menubar`) in **pixels with y down**, so a widget's hit test is
+  its draw rectangle. Solid shapes batch into one buffer and keep insertion order, which
+  is how a dropdown lands on top; text draws afterwards over all of it.
 - **voxity/overview.py** — bakes the whole extract into one flat PNG. Two passes:
   `data_bbox` histograms one node per object to find where the data actually *is*, then
   `bake` streams triangles through `_Batch`. Needs a live GL context, so it is imported
   lazily; `--build-map` bakes it headlessly through the same EGL path as `--screenshot`.
+- **voxity/voxel.py** — the model (`{(x,y,z): hue}`), the palette, the per-cell value
+  hash, exterior-cavity culling, the greedy mesher and JSON load/save. **No GL, no
+  pygame** — that is what lets the city import it. `mesh_vertices(quads, scale, offset)`
+  is the bridge to the city: `scale` is the cell size in metres.
+- **voxity/editor/** — the editing half. `app.py` owns the loop and the layout, `pick.py`
+  is the DDA ray march, `render.py` the two GL programs, `io.py` the file dialog and the
+  OBJ/PNG exports.
+- **voxity/startscreen.py** — the menu. Owns its own loop like mapview.py and returns
+  `'play'` / `'editor'` / `'quit'`.
 - **voxity/mapview.py** — the region picker. Owns its own event loop, returns a lon/lat
   box, and knows nothing about how the map was made. Regions are a **fixed grid**, not a
   freely placed rectangle: `MapView` divides `omap.extent` into `--size`-metre cells,
@@ -201,10 +259,13 @@ Every `Scene` array is `(x, z)` 2D; build.py lifts it to `(x, y, z)`. Camera yaw
 north. Get this backwards and the city mirrors.
 
 **Vertex layout.** `3f 3f 3f 1f` = position, normal, colour, material — declared in
-`MeshBuilder.pack`, consumed by `Renderer.scene_vao`, read by `SCENE_VS`. Material 0 is
-matte, 1 is water (ripple normal + specular in `SCENE_FS`); those are the only two, and
-`SCENE_FS` branches on `v_mat > 0.5`, so any third material added later renders as water
-until that test is replaced. Trees are a separate program and buffer entirely
+mesh.py, consumed by `Renderer.scene_vao`, read by `SCENE_VS`. `MAT_MATTE` 0,
+`MAT_WATER` 1 (ripple normal + specular), `MAT_VOXEL` 2 (the per-cell mosaic).
+`SCENE_FS` switches on `v_mat` **highest first**; a material with no branch falls through
+to matte, and a new one has to keep its distance from the others by more than 0.5.
+`u_voxel_cell` is one uniform for the whole scene, so every voxel model in a city has to
+be meshed at the same `scale` that `Renderer.voxel_cell` is set to, or the mosaic stops
+lining up with the geometry. Trees are a separate program and buffer entirely
 (`tree_mesh` + per-instance `x, z, height, radius, tint`), so the material slot never
 sees foliage. Changing the layout means touching all three places,
 plus the `'3f 28x'` stride in `scene_depth_vao`.
@@ -245,6 +306,25 @@ place, or it z-fights.
 `MeshBuilder.add` re-winds every triangle to agree with the normal it was given. Pass the
 normal you want; don't hand-order vertices.
 
+**The voxel look is a hash, evaluated twice.** A voxel's colour is `(hue, value)` at
+fixed saturation, and the *value* is never stored: it is
+`VALUE_POOL[hash(cell) % 8]`. Python computes it in `voxel.value_for_cell`; GLSL
+recomputes it per fragment in `shaders.voxel_value_glsl()`, which is **generated** from
+the palette constants precisely so the two cannot drift. Three things make that work and
+each is easy to break:
+
+* `hsv_to_rgb` is linear in V at fixed H and S, so the CPU hands over the *full-value*
+  colour and the shader multiplies the per-cell factor in. Change the palette to
+  something non-linear in V and the shader stops matching per-voxel shading.
+* The shader recovers the cell from the fragment's **world position**, stepping half a
+  cell back along the normal first so a fragment exactly on a face floors into the cell
+  that owns it. This is what makes the mosaic survive greedy meshing: one merged quad
+  covering a whole wall still draws one brightness square per voxel.
+* `& 7` stands in for `% len(VALUE_POOL)`, which is only valid while that length is a
+  power of two — `voxel_value_glsl` raises if it isn't. It is also why the two agree at
+  large coordinates, where GLSL's 32-bit multiply wraps and Python's does not: wrapping
+  mod 2³² preserves the low three bits.
+
 **Determinism.** Unmapped heights, colours, roof shapes and per-building tint all come
 from `_hash01`/`_jitter` seeded on the OSM id with a per-purpose salt — so the same box
 looks identical run to run, and cached meshes stay valid. Never swap these for `random`.
@@ -270,6 +350,9 @@ invalidate `Renderer._shadow_key`.
 4. Bump `CACHE_VERSION` (and `MESH_VERSION` if build.py changed, and `MAP_VERSION` if it
    shows on the map), then verify with `--screenshot` and, if the map changed,
    `--build-map --map-size 512`.
+
+Voxel models are **not** cached — they are meshed on load and on every edit — so none of
+the three versions covers them and none needs bumping for a voxel change.
 
 ## Style
 

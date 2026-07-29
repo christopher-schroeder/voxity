@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Render a square of an .osm.pbf as a 3D city.
+"""Render a square of an .osm.pbf as a 3D city, or edit the voxel models in it.
 
+    python main.py                              # start screen: city or editor
     python main.py --center 53.5503,9.9937 --size 1500
     python main.py --place speicherstadt --size 900
     python main.py --bbox 9.98,53.54,10.00,53.56
+    python main.py --editor                     # straight into the editor
 """
 
 import argparse
@@ -14,7 +16,7 @@ import time
 
 import numpy as np
 
-from voxity import extract
+from voxity import extract, voxel
 from voxity.build import build_scene
 from voxity.camera import Camera
 from voxity.geo import square_bbox
@@ -53,7 +55,7 @@ HELP_LINES = [
     ('T trees  L shadows  G fog', True),
     ('R reset  P screenshot  F1 help', True),
     ('M  back to the map', True),
-    ('ESC  release / quit', True),
+    ('ESC  release / back to the menu', True),
 ]
 
 
@@ -88,6 +90,10 @@ def parse_args(argv=None):
                    help='skip the region picker and go straight to the default')
     p.add_argument('--map-size', type=int, default=None,
                    help='long edge of the baked overview map in pixels')
+    p.add_argument('--editor', action='store_true',
+                   help='skip the start screen and open the voxel editor')
+    p.add_argument('--model', default=voxel.DEFAULT_MODEL,
+                   help=f'voxel model the editor opens (default {voxel.DEFAULT_MODEL})')
     return p.parse_args(argv)
 
 
@@ -255,6 +261,35 @@ def render_headless(args, scene, verts, trees):
     print(f'wrote {args.screenshot}')
 
 
+def render_editor_headless(args):
+    """One frame of the editor's 3D view to a PNG, no display needed.
+
+    The cheapest check that the voxel shader still compiles and that a model
+    still meshes — the whole path except the event loop.
+    """
+    import pygame
+    from voxity import editor
+
+    ctx = standalone_context()
+    w, h = args.width, args.height
+    colour = ctx.texture((w, h), 4, samples=0)
+    depth = ctx.depth_renderbuffer((w, h))
+    fbo = ctx.framebuffer(color_attachments=[colour], depth_attachment=depth)
+
+    ed = editor.Editor(ctx, args.model)
+    ed.frame()
+    print(f'  {len(ed.voxels)} voxels, {len(ed.remesh()) // 3} triangles')
+
+    fbo.use()
+    fbo.clear(0.10, 0.11, 0.13, 1.0, depth=1.0)
+    ed.draw_3d((w, h), over_ui=True)
+    ctx.finish()
+
+    surf = pygame.image.frombuffer(fbo.read(components=3), (w, h), 'RGB')
+    pygame.image.save(pygame.transform.flip(surf, False, True), args.screenshot)
+    print(f'wrote {args.screenshot}')
+
+
 def open_window(args):
     """Create the window and GL context. Returns (ctx, size)."""
     import moderngl
@@ -289,7 +324,7 @@ def splash(ctx, overlay, size, lines):
 
 
 def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
-    """The 3D loop. Returns 'quit' or 'map' (the player asked to go back)."""
+    """The 3D loop. Returns 'quit', 'menu' (ESC) or 'map' (asked to go back)."""
     import moderngl
     import pygame
     from voxity.renderer import Renderer
@@ -348,6 +383,7 @@ def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
                         pygame.event.set_grab(False)
                         pygame.mouse.set_visible(True)
                     else:
+                        outcome = 'menu'
                         running = False
                 elif k == pygame.K_TAB:
                     looking = not looking
@@ -408,38 +444,72 @@ def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
     return outcome
 
 
-def run_windowed(args):
-    """Open the window, then either play the given region or pick one first."""
+def run_city(ctx, args, overlay, help_overlay, state):
+    """Pick a region if needed, then fly it. Returns 'quit' or 'menu'.
+
+    `state` carries the baked map between visits, so coming back from the
+    editor doesn't re-read a 50 MB extract.
+    """
     import pygame
-    from voxity.hud import Overlay
 
     ensure_pbf(args)
-    ctx, size = open_window(args)
-    overlay = Overlay(ctx)
-    help_overlay = Overlay(ctx)
-
     # An explicit region skips the map entirely, so scripted runs behave
     # exactly as they did before the map existed.
     bbox = resolve_bbox(args) if region_given(args) or args.no_map else None
-    omap = None
 
     while True:
+        size = pygame.display.get_window_size()
         if bbox is None:
-            if omap is None:
-                omap = ensure_map(ctx, args, overlay, size)
-            picked = mapview_choose(ctx, omap, size, overlay, help_overlay,
-                                    args)
-            if picked is None:
-                break
+            if state.get('omap') is None:
+                state['omap'] = ensure_map(ctx, args, overlay, size)
+            picked = mapview_choose(ctx, state['omap'], size, overlay,
+                                    help_overlay, args)
+            if isinstance(picked, str):          # 'menu' or 'quit'
+                return picked
             bbox, args.size = picked
 
         scene, verts, trees = prepare(args, bbox)
         size = pygame.display.get_window_size()
-        if fly(ctx, args, scene, verts, trees, overlay, help_overlay, size) \
-                == 'quit':
-            break
-        size = pygame.display.get_window_size()
+        outcome = fly(ctx, args, scene, verts, trees, overlay, help_overlay, size)
+        if outcome != 'map':
+            return outcome
         bbox = None
+
+
+def run_windowed(args):
+    """Open the window, then run whichever half of voxity the player asked for."""
+    import pygame
+    from voxity import editor, startscreen
+    from voxity.hud import Overlay
+
+    ctx, size = open_window(args)
+    overlay = Overlay(ctx)
+    help_overlay = Overlay(ctx)
+    state = {'omap': None}
+
+    # Naming a tool on the command line skips the menu, so every scripted
+    # invocation goes straight where it used to.
+    forced = ('editor' if args.editor
+              else 'play' if region_given(args) or args.no_map else None)
+    choice = forced
+
+    while True:
+        size = pygame.display.get_window_size()
+        if choice is None:
+            choice = startscreen.choose(ctx, size, frames=args.frames)
+        if choice == 'quit':
+            break
+        if choice == 'editor':
+            outcome = editor.run(ctx, size, args.model, args.frames,
+                                 hud=help_overlay)
+        else:
+            outcome = run_city(ctx, args, overlay, help_overlay, state)
+        # `--frames` is a smoke test: one pass through the chain, then out.
+        # Without this it would loop forever, since every stage gives up after
+        # N frames by handing control back rather than quitting.
+        if outcome == 'quit' or forced or args.frames:
+            break
+        choice = None
 
     pygame.quit()
 
@@ -478,6 +548,9 @@ def main():
         build_map(args)
         return
     if args.screenshot:
+        if args.editor:
+            render_editor_headless(args)
+            return
         # headless: there is nobody to pick a region, so fall back to the
         # default square the way it worked before the map existed
         scene, verts, trees = prepare(args)

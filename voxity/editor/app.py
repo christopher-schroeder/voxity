@@ -1,0 +1,357 @@
+"""The voxel editor: build the models the city is made of.
+
+Runs against the window and moderngl context main.py already opened, so the
+start screen can hand control here and take it back. Returns 'quit' when the
+window was closed and 'menu' on ESC.
+"""
+
+import os
+
+import numpy as np
+import pygame
+
+from .. import ui as uikit
+from .. import voxel
+from ..camera import OrbitCamera, screen_ray
+from . import io
+from .pick import BRUSH_EDGES, DEFAULT_BRUSH, brush_block, pick
+from .render import EditorRenderer, box_lines
+
+DEFAULT_MODEL = voxel.DEFAULT_MODEL
+
+DRAG_THRESHOLD = 5       # pixels; below this a press+release counts as a click
+
+SWATCH = 30
+SWATCH_GAP = 3
+SWATCH_MARGIN = 14
+SWATCH_TOP = uikit.MENUBAR_H + SWATCH_MARGIN
+ROW_GAP = 8
+
+HOVER_COL = (0.95, 0.30, 0.30)      # the voxel a right-click would delete
+PLACE_COL = (0.30, 0.95, 0.40)      # where a left-click would add
+
+MENU_DEFS = [
+    ('File', [('New', 'new'), ('Open...', 'open'), ('Save', 'save'),
+              ('Save As...', 'save_as'), ('Export OBJ...', 'export_obj'),
+              ('Export PNG...', 'export_png'), ('Back to menu', 'menu')]),
+    ('View', [('Toggle Grid', 'toggle_grid'), ('Reset Camera', 'reset_cam'),
+              ('Frame Model', 'frame')]),
+]
+
+HELP = [
+    ('L-drag orbit   R-drag pan   wheel zoom', True),
+    ('L-click add   R-click delete', True),
+    ('swatch or 1-0   hue', True),
+    (', .  brush size    G  grid', True),
+    ('S / L  save / load    F  frame model', True),
+    ('ESC  back to the menu', True),
+]
+
+
+def swatch_rect(i):
+    return (SWATCH_MARGIN + i * (SWATCH + SWATCH_GAP), SWATCH_TOP, SWATCH, SWATCH)
+
+
+def swatch_at(mx, my):
+    """Index of the hue swatch under the cursor, or None."""
+    for i in range(voxel.N_HUES):
+        x, y, w, h = swatch_rect(i)
+        if x <= mx <= x + w and y <= my <= y + h:
+            return i
+    return None
+
+
+def seed_model():
+    """Something on screen on a cold start, so the grid isn't just empty."""
+    voxels = {}
+    for x in range(-1, 2):
+        for z in range(-1, 2):
+            voxels[(x, 0, z)] = 20            # hue only; the value is positional
+    voxels[(0, 1, 0)] = 0                     # red-ish
+    voxels[(1, 1, 1)] = 11                    # green-ish
+    voxels[(-1, 1, -1)] = 22                  # blue-ish
+    return voxels
+
+
+def load_or_seed(path):
+    """The model at `path`, or the seed scene when there isn't a usable one.
+
+    An empty file counts as "nothing there": opening onto a bare grid gives
+    you nothing to orbit around and no clue that the editor works.
+    """
+    try:
+        voxels = voxel.load(path)
+    except (OSError, ValueError, KeyError):
+        return seed_model()
+    if not voxels:
+        return seed_model()
+    print(f'loaded {len(voxels)} voxels from {path}')
+    return voxels
+
+
+class Editor:
+    """Editor state and the per-frame work, split out so main can drive it."""
+
+    def __init__(self, ctx, model_path=DEFAULT_MODEL):
+        self.ctx = ctx
+        self.renderer = EditorRenderer(ctx)
+        self.voxels = load_or_seed(model_path)
+        self.path = model_path
+        self.cam = OrbitCamera(target=voxel.centre(self.voxels))
+        self.hue = voxel.N_HUES // 2
+        self.brush = DEFAULT_BRUSH
+        self.show_grid = True
+        self.dirty = True
+        self.hover = None                     # cell under the cursor
+        self.block = None                     # min corner of the block to place
+        self.frame()                          # open looking at whatever loaded
+
+    def remesh(self):
+        verts = voxel.model_vertices(self.voxels)
+        self.renderer.upload(verts)
+        self.dirty = False
+        return verts
+
+    def aim(self, mouse, size):
+        """Update hover/placement targets from the mouse, using last frame's camera."""
+        vp = self.cam.projection(size[0] / max(size[1], 1)) @ self.cam.view()
+        origin, direction = screen_ray(np.linalg.inv(vp), mouse, size)
+        self.hover, info = pick(self.voxels, origin, direction)
+        self.block = brush_block(self.hover, info, BRUSH_EDGES[self.brush])
+
+    def add(self):
+        if self.block is None:
+            return
+        for cell in voxel.block_cells(self.block, BRUSH_EDGES[self.brush]):
+            self.voxels[cell] = self.hue
+        self.dirty = True
+
+    def delete(self):
+        if self.hover is not None and self.voxels.pop(self.hover, None) is not None:
+            self.dirty = True
+
+    def frame(self):
+        """Point the camera at the model and back off far enough to see it."""
+        self.cam.target = voxel.centre(self.voxels)
+        b = voxel.bounds(self.voxels)
+        if b is not None:
+            lo, hi = b
+            span = max(hi[i] - lo[i] for i in range(3))
+            self.cam.distance = float(np.clip(span * 2.0, 6.0, 120.0))
+
+    def draw_3d(self, size, over_ui):
+        if self.dirty:
+            self.remesh()
+        boxes = []
+        if not over_ui:
+            if self.hover is not None:
+                boxes.append(box_lines(self.hover, 1, HOVER_COL))
+            if self.block is not None:
+                boxes.append(box_lines(self.block, BRUSH_EDGES[self.brush],
+                                       PLACE_COL))
+        self.renderer.draw(self.cam, size[0] / max(size[1], 1),
+                           self.show_grid, boxes)
+
+    def draw_ui(self, ui, menubar, size, mouse):
+        ui.begin(size)
+        for i in range(voxel.N_HUES):
+            x, y, w, h = swatch_rect(i)
+            ui.rect(x, y, w, h, voxel.color_rgb(i, voxel.CENTRE_VALUE))
+        ui.outline(*swatch_rect(self.hue), (1.0, 1.0, 1.0), px=3)
+        self._draw_brush(ui)
+        menubar.draw(size[0], mouse)
+        ui.flush()
+
+    def _draw_brush(self, ui):
+        """Three nested squares, the active brush outlined."""
+        top = SWATCH_TOP + SWATCH + ROW_GAP
+        big = max(BRUSH_EDGES)
+        x = SWATCH_MARGIN
+        for i, e in enumerate(BRUSH_EDGES):
+            px = max(10, round(SWATCH * e / big))
+            y = top + (SWATCH - px)                  # bottom-align the squares
+            g = 0.80 if i == self.brush else 0.35
+            ui.rect(x, y, px, px, (g, g, g))
+            if i == self.brush:
+                ui.outline(x, y, px, px, (1.0, 1.0, 1.0), px=2)
+            x += SWATCH + 10
+
+    def release(self):
+        self.renderer.release()
+
+
+def _menu_action(ed, action, ctx, size):
+    """Apply a menubar action. Returns an outcome string, or None to carry on."""
+    if action == 'new':
+        ed.voxels = {}
+        ed.dirty = True
+    elif action == 'open':
+        p = io.ask_path(False, 'Open model', ed.path,
+                        [('JSON', '*.json'), ('All files', '*.*')])
+        if p:
+            try:
+                ed.voxels = voxel.load(p)
+                ed.path = p
+                ed.dirty = True
+                ed.frame()
+                print(f'loaded {len(ed.voxels)} voxels from {p}')
+            except (OSError, ValueError, KeyError) as exc:
+                print(f'could not load {p}: {exc}')
+    elif action == 'save':
+        _save(ed, ed.path)
+    elif action == 'save_as':
+        p = io.ask_path(True, 'Save model as', os.path.basename(ed.path),
+                        [('JSON', '*.json')])
+        if p:
+            ed.path = p
+            _save(ed, p)
+    elif action == 'export_obj':
+        p = io.ask_path(True, 'Export OBJ', 'model.obj', [('OBJ', '*.obj')])
+        if p:
+            io.export_obj(ed.voxels, p)
+    elif action == 'export_png':
+        p = io.ask_path(True, 'Export PNG', 'model.png', [('PNG', '*.png')])
+        if p:
+            # redraw the 3D view alone so no UI ends up in the file
+            ctx.screen.use()
+            ctx.screen.clear(0.10, 0.11, 0.13, 1.0, depth=1.0)
+            ed.draw_3d(size, over_ui=True)
+            io.export_png(ctx, size, p)
+    elif action == 'toggle_grid':
+        ed.show_grid = not ed.show_grid
+    elif action == 'reset_cam':
+        ed.cam = OrbitCamera(target=voxel.centre(ed.voxels))
+    elif action == 'frame':
+        ed.frame()
+    elif action == 'menu':
+        return 'menu'
+    return None
+
+
+def _save(ed, path):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    n = voxel.save(ed.voxels, path)
+    print(f'saved {n} voxels to {path}')
+
+
+def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
+    """Drive the editor. Returns 'quit' or 'menu'."""
+    ed = Editor(ctx, model_path)
+    ui = uikit.UI(ctx)
+    menubar = uikit.Menubar(ui, MENU_DEFS)
+    clock = pygame.time.Clock()
+
+    pygame.display.set_caption('voxity — editor')
+    pygame.mouse.set_visible(True)
+    pygame.event.set_grab(False)
+
+    press = {}                     # button -> pixels dragged since the press
+    outcome = 'quit'
+    frame = 0
+    running = True
+
+    while running:
+        clock.tick(60)
+        frame += 1
+        if frames and frame > frames:
+            outcome = 'menu'
+            break
+        size = pygame.display.get_window_size()
+        mouse = pygame.mouse.get_pos()
+        click_add = click_del = False
+        action = None
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.VIDEORESIZE:
+                size = (max(320, event.w), max(240, event.h))
+                ctx.viewport = (0, 0, *size)
+            elif event.type == pygame.KEYDOWN:
+                k = event.key
+                if k == pygame.K_ESCAPE:
+                    outcome = 'menu'
+                    running = False
+                elif k == pygame.K_g:
+                    ed.show_grid = not ed.show_grid
+                elif k == pygame.K_f:
+                    ed.frame()
+                elif k == pygame.K_s:
+                    _save(ed, ed.path)
+                elif k == pygame.K_l:
+                    try:
+                        ed.voxels = voxel.load(ed.path)
+                        ed.dirty = True
+                        print(f'loaded {len(ed.voxels)} voxels from {ed.path}')
+                    except (OSError, ValueError, KeyError) as exc:
+                        print(f'could not load {ed.path}: {exc}')
+                elif k == pygame.K_COMMA:              # ',' smaller brush
+                    ed.brush = min(len(BRUSH_EDGES) - 1, ed.brush + 1)
+                elif k == pygame.K_PERIOD:             # '.' larger brush
+                    ed.brush = max(0, ed.brush - 1)
+                elif pygame.K_0 <= k <= pygame.K_9:
+                    n = k - pygame.K_0                 # 0..9
+                    d = 10 if n == 0 else n            # 1..10
+                    ed.hue = round((d - 1) / 9 * (voxel.N_HUES - 1))
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    consumed, action = menubar.handle_click(*event.pos)
+                    if not consumed:
+                        press[1] = 0.0                 # a potential 3D click
+                elif event.button in (2, 3):
+                    menubar.open = None
+                    press[event.button] = 0.0
+                elif event.button == 4:
+                    ed.cam.zoom(1)
+                elif event.button == 5:
+                    ed.cam.zoom(-1)
+            elif event.type == pygame.MOUSEMOTION:
+                dx, dy = event.rel
+                if press.get(1) is not None and event.buttons[0]:
+                    press[1] += abs(dx) + abs(dy)
+                    ed.cam.orbit(dx, dy)
+                for b, idx in ((2, 1), (3, 2)):
+                    if press.get(b) is not None and event.buttons[idx]:
+                        press[b] += abs(dx) + abs(dy)
+                        ed.cam.pan(dx, dy)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                moved = press.pop(event.button, None)
+                if moved is not None and moved < DRAG_THRESHOLD:
+                    if event.button == 1:
+                        hit = swatch_at(*event.pos)
+                        if hit is not None:
+                            ed.hue = hit
+                        else:
+                            click_add = True
+                    elif event.button == 3:
+                        click_del = True
+
+        over_ui = mouse[1] < uikit.MENUBAR_H or menubar.open is not None
+        if not over_ui:
+            ed.aim(mouse, size)
+        else:
+            ed.hover = ed.block = None
+        if click_add and not over_ui:
+            ed.add()
+        if click_del and not over_ui:
+            ed.delete()
+
+        result = _menu_action(ed, action, ctx, size)
+        if result:
+            outcome = result
+            running = False
+
+        ctx.screen.use()
+        ctx.viewport = (0, 0, *size)
+        ctx.screen.clear(0.10, 0.11, 0.13, 1.0, depth=1.0)
+        ed.draw_3d(size, over_ui)
+        ed.draw_ui(ui, menubar, size, mouse)
+        if hud is not None:
+            hud.draw(HELP, size, 'bl')
+        pygame.display.flip()
+
+    ed.release()
+    ui.release()
+    return outcome

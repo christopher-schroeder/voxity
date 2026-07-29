@@ -1,19 +1,61 @@
 # voxity
 
-Builds a 3D city out of an `.osm.pbf` extract and flies you through it.
-pygame for the window and input, moderngl for the rendering.
+Two halves of one thing: a 3D city built out of an `.osm.pbf` extract that you
+fly through, and a **voxel editor** for the models it is made of. pygame for
+the window and input, moderngl for the rendering, one binary and one GL context
+for both.
 
-Start it with no arguments and you get a flat map of the whole extract — the
-city at a glance, roads and water and parks — to pick your square off. Pick one
-and it pulls out everything inside, extrudes the buildings, lays out the roads
-and water, and renders the result with a shadow-mapped sun.
+Start it with no arguments and you land on a menu. **Fly the city** gives you a
+flat map of the whole extract — the city at a glance, roads and water and parks
+— to pick your square off; pick one and it pulls out everything inside,
+extrudes the buildings, lays out the roads and water, and renders the result
+with a shadow-mapped sun. **Voxel editor** opens a grid you build blocky models
+on, and `ESC` from either takes you back to the menu.
 
 ```
-./env/bin/voxity                                  # map, then pick a square
-./env/bin/voxity --place rathaus --size 1200      # straight in
+./env/bin/voxity                                  # menu
+./env/bin/voxity --place rathaus --size 1200      # straight into the city
 ./env/bin/voxity --center 53.5503,9.9937 --size 2000
 ./env/bin/voxity --bbox 9.98,53.54,10.00,53.56
+./env/bin/voxity --editor                         # straight into the editor
 ```
+
+## The editor
+
+Unit cubes on a grid, an orbiting camera, and a brush that stamps 1, 8 or 64 of
+them at a time. You pick the **hue**; the brightness is not yours to choose —
+it is a hash of the cell's position, so neighbouring voxels vary slightly and a
+given cell always looks the same. That is what gives a flat wall its mosaic.
+
+| | |
+|---|---|
+| left-drag | orbit |
+| right-drag | pan |
+| wheel | zoom |
+| left-click | add a block on the green highlight |
+| right-click | delete the voxel under the red highlight |
+| click a swatch, `1`–`9` `0` | set the hue |
+| `,` `.` | shrink / grow the brush (1 / 8 / 64 voxels) |
+| `G` | floor grid |
+| `F` | frame the model |
+| `S` `L` | save / load the current model |
+| `ESC` | back to the menu |
+
+**File** does New / Open / Save / Save As / Export OBJ / Export PNG through a
+native dialog when tkinter is available. Models are JSON under `models/`.
+
+Two passes turn the voxel dict into as few triangles as possible without
+changing what you see. **Exterior-cavity culling** flood-fills empty space
+inward from outside the bounding box and keeps a face only if the air it faces
+is reachable from there, so faces sealing an enclosed hollow cost nothing.
+**Greedy merging** then fuses adjacent same-hue faces on each plane into the
+largest rectangles it can. The per-cell brightness survives because it is
+evaluated in the fragment shader from world position, not baked into vertices —
+one merged quad still draws one brightness square per voxel.
+
+The same mesher feeds the city: `voxel.mesh_vertices` emits the exact vertex
+layout `build.py` does, so a model concatenates onto a city's vertex buffer and
+comes back lit by the city's sun and shadow map, still wearing its mosaic.
 
 ## The map
 
@@ -41,7 +83,7 @@ the edge length, and with it the grid: 1200 m gives Hamburg 31 × 30 cells.
 | wheel, `+` `-` | zoom the map |
 | right-drag | pan |
 | click, `ENTER` | play the highlighted cell |
-| `ESC` | quit |
+| `ESC` | back to the menu |
 
 In the city, `M` takes you back to the map to pick somewhere else.
 
@@ -89,7 +131,7 @@ built-in `--place` presets are all Hamburg.
 | `M` | back to the overview map |
 | `P` | screenshot into `screenshots/` |
 | `F1` | hide the key list |
-| `ESC` | release the mouse, then quit |
+| `ESC` | release the mouse, then back to the menu |
 
 ## Options
 
@@ -110,9 +152,17 @@ built-in `--place` presets are all Hamburg.
 --build-map       bake the overview map offscreen and exit
 --map-size PX     long edge of the baked map (default 4096)
 --no-map          skip the picker and use the default square
+--editor          skip the menu and open the voxel editor
+--model FILE      model the editor opens   (default models/model.json)
 ```
 
+Naming a tool on the command line — `--place`/`--center`/`--bbox`, `--no-map`
+or `--editor` — skips the menu, so every scripted invocation goes straight
+where it always did.
+
 `--screenshot` uses an offscreen EGL context, so it works without a display.
+With `--editor` it renders the model instead of the city, which is the cheapest
+check that the voxel shader still compiles.
 
 ## What gets built
 
@@ -136,21 +186,35 @@ straddle the edge are dropped rather than sliced.
 ## Layout
 
 ```
-main.py            CLI, window, event loop
-voxity/extract.py  .osm.pbf -> features inside the box (cached)
-voxity/tags.py     what OSM tags mean: width, height, colour
-voxity/geo.py      local metric projection, polygon/line clipping
-voxity/build.py    features -> triangles (extrusion, ribbons, roofs, trees)
-voxity/renderer.py moderngl passes: shadow map, scene, sky, trees
-voxity/overview.py the whole extract baked into one flat 2D map (cached)
-voxity/mapview.py  picking the region to play on, off that map
-voxity/shaders.py  GLSL
-voxity/camera.py   matrices and the fly camera
-voxity/hud.py      text overlay
+main.py               CLI, window, dispatch between the two tools
+voxity/startscreen.py the menu
+
+shared
+voxity/mesh.py        the vertex layout and the triangle accumulator
+voxity/shaders.py     GLSL, including the per-cell voxel hash
+voxity/camera.py      matrices, the fly camera and the editor's orbit camera
+voxity/hud.py         text overlay panels
+voxity/ui.py          2D widgets: rectangles, text, menubar
+
+city
+voxity/extract.py     .osm.pbf -> features inside the box (cached)
+voxity/tags.py        what OSM tags mean: width, height, colour
+voxity/geo.py         local metric projection, polygon/line clipping
+voxity/build.py       features -> triangles (extrusion, ribbons, roofs, trees)
+voxity/renderer.py    moderngl passes: shadow map, scene, sky, trees
+voxity/overview.py    the whole extract baked into one flat 2D map (cached)
+voxity/mapview.py     picking the region to play on, off that map
+
+voxels
+voxity/voxel.py       the model, the palette, the greedy mesher, JSON
+voxity/editor/        the editing half: picking, GL, file dialogs, the loop
 ```
 
+`voxel.py` sits deliberately below both: it holds everything the editor and the
+city have to agree on, and touches neither GL nor pygame.
+
 Coordinates are projected to metres around the centre of the square:
-x east, z south, y up.
+x east, z south, y up. The editor works in unit cells with the same axes.
 
 ## Caching
 

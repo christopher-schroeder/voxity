@@ -1,5 +1,43 @@
 """GLSL sources."""
 
+from . import voxel
+
+
+def voxel_value_glsl():
+    """The per-cell brightness hash, generated from the palette in voxel.py.
+
+    This is the editor's look in one function, and the reason it is generated
+    rather than written out: `value_for_cell` and this shader must agree
+    exactly, or a merged quad stops matching the voxels under it. Including it
+    is what gives a shader the mosaic; `u_voxel_cell` says how big a cell is in
+    world units, so the same code serves 1 m editor cubes and half-metre bricks
+    on a city building.
+    """
+    n = len(voxel.VALUE_POOL)
+    # `& mask` reproduces Python's `n % len(VALUE_POOL)` only for a power-of-two
+    # length; the low bits of a two's-complement int are the floored modulo, so
+    # it agrees even for negative coordinates and even when GLSL's 32-bit
+    # multiply wraps where Python's does not.
+    if n & (n - 1):
+        raise ValueError('VALUE_POOL length must be a power of two')
+    mult = ', '.join('%.8f' % (v / (voxel.N_VALS - 1)) for v in voxel.VALUE_POOL)
+    px, py, pz = voxel.HASH_PRIMES
+    return f"""
+uniform float u_voxel_cell;    // edge length of one voxel in world units
+const float VOXEL_MULT[{n}] = float[{n}]({mult});
+
+float voxel_value(vec3 world, vec3 normal) {{
+    // Step half a cell back along the normal first, so a fragment exactly on a
+    // face floors into the cell that owns it rather than its neighbour.
+    vec3 cell = floor((world - 0.5 * normal * u_voxel_cell) / u_voxel_cell);
+    int X = int(cell.x) * {px};
+    int Y = int(cell.y) * {py};
+    int Z = int(cell.z) * {pz};
+    return VOXEL_MULT[(X ^ Y ^ Z) & {n - 1}];
+}}
+"""
+
+
 COMMON_LIGHTING = """
 uniform vec3 u_sun;            // direction towards the sun
 uniform vec3 u_sun_col;
@@ -73,13 +111,20 @@ in vec3 v_col;
 in float v_mat;
 in vec4 v_light;
 out vec4 f_color;
-""" + COMMON_LIGHTING + """
+""" + COMMON_LIGHTING + voxel_value_glsl() + """
 void main() {
     vec3 n = normalize(v_norm);
-    vec3 base = pow(max(v_col, vec3(0.0)), vec3(2.2));
+    vec3 albedo = max(v_col, vec3(0.0));
     float gloss = 0.0;
 
-    if (v_mat > 0.5) {                       // water
+    // Material switch, highest first. Every material needs a branch of its own:
+    // fall through and it renders matte.
+    if (v_mat > 1.5) {                       // voxel model, from the editor
+        // multiplied into the albedo *before* the sRGB decode below, because
+        // that is where the editor applies it (VOXEL_FS never decodes). Do it
+        // after and the same hash comes out visibly flatter here than there.
+        albedo *= voxel_value(v_world, n);
+    } else if (v_mat > 0.5) {                // water
         vec2 w = v_world.xz;
         float t = u_time * 0.35;
         n = normalize(n + vec3(
@@ -89,6 +134,7 @@ void main() {
         gloss = 1.0;
     }
 
+    vec3 base = pow(albedo, vec3(2.2));
     float ndl = max(dot(n, u_sun), 0.0);
     float sh = mix(1.0, shadow_lookup(v_light, ndl), u_shadow_strength);
     vec3 ambient = mix(u_bounce_col, u_sky_col, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
@@ -104,6 +150,84 @@ void main() {
 
     f_color = vec4(tonemap(apply_fog(col, v_world)), 1.0);
 }
+"""
+
+# --- voxel editor -----------------------------------------------------------
+
+# The editor lights voxels its own way: one fixed direction, flat, no shadows,
+# no fog and no tone mapping, so a hue on screen is the hue in the palette. The
+# city runs the same models through SCENE_FS instead and lights them with its
+# sun; `voxel_value` is the only thing both paths share, and it is the part you
+# actually recognise as the voxel look.
+VOXEL_VS = """#version 330 core
+in vec3 in_pos;
+in vec3 in_norm;
+in vec3 in_col;
+uniform mat4 u_vp;
+out vec3 v_world;
+out vec3 v_norm;
+out vec3 v_col;
+void main() {
+    v_world = in_pos;
+    v_norm = in_norm;
+    v_col = in_col;
+    gl_Position = u_vp * vec4(in_pos, 1.0);
+}
+"""
+
+VOXEL_FS = """#version 330 core
+in vec3 v_world;
+in vec3 v_norm;
+in vec3 v_col;
+out vec4 f_color;
+uniform vec3 u_light;
+uniform float u_ambient;
+uniform float u_diffuse;
+""" + voxel_value_glsl() + """
+void main() {
+    vec3 n = normalize(v_norm);
+    float br = u_ambient + u_diffuse * max(0.0, dot(n, u_light));
+    f_color = vec4(v_col * br * voxel_value(v_world, n), 1.0);
+}
+"""
+
+# Plain coloured lines in world space: the editor's floor grid and the hover /
+# placement boxes.
+LINE_VS = """#version 330 core
+in vec3 in_pos;
+in vec3 in_col;
+uniform mat4 u_vp;
+out vec3 v_col;
+void main() {
+    v_col = in_col;
+    gl_Position = u_vp * vec4(in_pos, 1.0);
+}
+"""
+
+LINE_FS = """#version 330 core
+in vec3 v_col;
+out vec4 f_color;
+void main() { f_color = vec4(v_col, 1.0); }
+"""
+
+# Flat 2D shapes for the UI, in pixels with y growing downward — the same
+# coordinates pygame reports for the mouse, so hit tests and drawing agree.
+UI_VS = """#version 330 core
+in vec2 in_pos;
+in vec4 in_col;
+uniform vec2 u_screen;
+out vec4 v_col;
+void main() {
+    v_col = in_col;
+    gl_Position = vec4(2.0 * in_pos.x / u_screen.x - 1.0,
+                       1.0 - 2.0 * in_pos.y / u_screen.y, 0.0, 1.0);
+}
+"""
+
+UI_FS = """#version 330 core
+in vec4 v_col;
+out vec4 f_color;
+void main() { f_color = v_col; }
 """
 
 DEPTH_VS = """#version 330 core
