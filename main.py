@@ -14,10 +14,10 @@ import time
 
 import numpy as np
 
-from osmcity import extract
-from osmcity.build import build_scene
-from osmcity.camera import Camera
-from osmcity.geo import square_bbox
+from voxity import extract
+from voxity.build import build_scene
+from voxity.camera import Camera
+from voxity.geo import square_bbox
 
 DEFAULT_PBF = 'hamburg-260728.osm.pbf'
 # Geofabrik names its dated snapshots exactly like DEFAULT_PBF, so the default
@@ -193,7 +193,7 @@ def make_camera(scene, view=None):
 def render_headless(args, scene, verts, trees):
     import moderngl
     import pygame
-    from osmcity.renderer import Renderer
+    from voxity.renderer import Renderer
 
     ctx = None
     for backend in ('egl', None):
@@ -228,8 +228,8 @@ def render_headless(args, scene, verts, trees):
 def run(args, scene, verts, trees):
     import moderngl
     import pygame
-    from osmcity.hud import Overlay
-    from osmcity.renderer import Renderer
+    from voxity.hud import Overlay
+    from voxity.renderer import Renderer
 
     pygame.init()
     pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
@@ -242,7 +242,7 @@ def run(args, scene, verts, trees):
 
     size = (args.width, args.height)
     pygame.display.set_mode(size, pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE)
-    pygame.display.set_caption('osm city — ' + os.path.basename(args.pbf))
+    pygame.display.set_caption('voxity — ' + os.path.basename(args.pbf))
     ctx = moderngl.create_context()
     ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
 
@@ -319,7 +319,7 @@ def run(args, scene, verts, trees):
                     cam.pos, cam.yaw, cam.pitch = home[0].copy(), home[1], home[2]
                 elif k == pygame.K_p:
                     os.makedirs('screenshots', exist_ok=True)
-                    name = time.strftime('screenshots/osm-%Y%m%d-%H%M%S.png')
+                    name = time.strftime('screenshots/voxity-%Y%m%d-%H%M%S.png')
                     data = ctx.screen.read(components=3)
                     surf = pygame.image.frombuffer(data, size, 'RGB')
                     pygame.image.save(pygame.transform.flip(surf, False, True), name)

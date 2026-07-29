@@ -1,4 +1,4 @@
-# osm city
+# voxity
 
 Builds a 3D city out of an `.osm.pbf` extract and flies you through it.
 pygame for the window and input, moderngl for the rendering.
@@ -8,9 +8,9 @@ buildings, lays out the roads and water, and renders the result with a
 shadow-mapped sun.
 
 ```
-./env/bin/osm-city --place rathaus --size 1200
-./env/bin/osm-city --center 53.5503,9.9937 --size 2000
-./env/bin/osm-city --bbox 9.98,53.54,10.00,53.56
+./env/bin/voxity --place rathaus --size 1200
+./env/bin/voxity --center 53.5503,9.9937 --size 2000
+./env/bin/voxity --bbox 9.98,53.54,10.00,53.56
 ```
 
 ## The extract
@@ -21,7 +21,7 @@ one is **fetched automatically on first run** (51 MB from
 just works:
 
 ```
-./env/bin/osm-city --place rathaus
+./env/bin/voxity --place rathaus
 fetching https://download.geofabrik.de/europe/germany/hamburg-260728.osm.pbf
      51.0 MB  100.0%
 ```
@@ -34,7 +34,7 @@ For any other region, give both the file and where to get it — the region path
 be guessed from a filename:
 
 ```
-./env/bin/osm-city --pbf berlin.osm.pbf \
+./env/bin/voxity --pbf berlin.osm.pbf \
     --pbf-url https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf
 ```
 
@@ -100,15 +100,15 @@ straddle the edge are dropped rather than sliced.
 ## Layout
 
 ```
-main.py             CLI, window, event loop
-osmcity/extract.py  .osm.pbf -> features inside the box (cached)
-osmcity/tags.py     what OSM tags mean: width, height, colour
-osmcity/geo.py      local metric projection, polygon/line clipping
-osmcity/build.py    features -> triangles (extrusion, ribbons, roofs, trees)
-osmcity/renderer.py moderngl passes: shadow map, scene, sky, trees
-osmcity/shaders.py  GLSL
-osmcity/camera.py   matrices and the fly camera
-osmcity/hud.py      text overlay
+main.py            CLI, window, event loop
+voxity/extract.py  .osm.pbf -> features inside the box (cached)
+voxity/tags.py     what OSM tags mean: width, height, colour
+voxity/geo.py      local metric projection, polygon/line clipping
+voxity/build.py    features -> triangles (extrusion, ribbons, roofs, trees)
+voxity/renderer.py moderngl passes: shadow map, scene, sky, trees
+voxity/shaders.py  GLSL
+voxity/camera.py   matrices and the fly camera
+voxity/hud.py      text overlay
 ```
 
 Coordinates are projected to metres around the centre of the square:
@@ -139,14 +139,14 @@ Conda provides the interpreter and Poetry; Poetry reads `pyproject.toml` /
 into `./env`. `poetry.toml` sets `virtualenvs.create = false` so Poetry installs
 into the interpreter it is running under instead of making a virtualenv.
 
-The project goes in editable — `osm_city.pth` puts the repo root on `sys.path`, so
-edits to `osmcity/` and `main.py` take effect with no reinstall. Only a change to
+The project goes in editable — `voxity.pth` puts the repo root on `sys.path`, so
+edits to `voxity/` and `main.py` take effect with no reinstall. Only a change to
 `pyproject.toml` needs `./env/bin/poetry install` re-run.
 
 Run everything through `./env/bin/`:
 
 ```
-./env/bin/osm-city --place rathaus     # or ./env/bin/python main.py ...
+./env/bin/voxity --place rathaus       # or ./env/bin/python main.py ...
 ./env/bin/poetry add somepackage       # updates pyproject + lock, installs into ./env
 ./env/bin/ruff check .
 ```

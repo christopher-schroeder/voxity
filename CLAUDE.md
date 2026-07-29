@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A single-binary-ish Python app that reads a square out of an `.osm.pbf` extract, turns
 OSM features into triangles, and flies a camera through them with moderngl. No test
-suite — just `main.py` and the `osmcity/` package, Poetry for dependencies, and git
+suite — just `main.py` and the `voxity/` package, Poetry for dependencies, and git
 (`origin` is `github.com:christopher-schroeder/voxity`).
 
 `.osm.pbf` extracts are **not** in the repo (`.gitignore`), nor is `cache/` or `env/`.
@@ -26,17 +26,17 @@ The environment is `./env`, a **conda environment** with Poetry installed inside
 the project installed **editable** into that same environment:
 
 ```
-./env/bin/osm-city --place rathaus --size 1200    # window, fly around
-./env/bin/osm-city --center 53.5503,9.9937 --size 2000
-./env/bin/osm-city --list-places                  # 14 Hamburg presets in main.py
+./env/bin/voxity --place rathaus --size 1200    # window, fly around
+./env/bin/voxity --center 53.5503,9.9937 --size 2000
+./env/bin/voxity --list-places                  # 14 Hamburg presets in main.py
 ```
 
-`osm-city` is a console script pointing at `main:main`; `./env/bin/python main.py ...`
+`voxity` is a console script pointing at `main:main`; `./env/bin/python main.py ...`
 is equivalent. The **system** `python3` does *not* have moderngl — always go through
 `./env/bin/`.
 
-Because the install is editable (`osm_city.pth` puts the repo root on `sys.path`), edits
-to `osmcity/` and `main.py` take effect immediately — never reinstall to test a change.
+Because the install is editable (`voxity.pth` puts the repo root on `sys.path`), edits
+to `voxity/` and `main.py` take effect immediately — never reinstall to test a change.
 Only a change to `pyproject.toml` itself needs `./env/bin/pip install -e .` re-run.
 
 **Poetry lives inside `./env` and installs into it.** `poetry.toml` sets
@@ -77,8 +77,8 @@ the context against the system driver; conda-forge `mesa`/`libglvnd` in `./env` 
 shadow it. `--screenshot` never hits this, so headless smoke tests pass while the window
 is broken — check both.
 
-`main.py` is a top-level module, not part of the `osmcity` package, so `pyproject.toml`
-lists it explicitly under `[tool.poetry] packages` alongside `osmcity`. A new top-level
+`main.py` is a top-level module, not part of the `voxity` package, so `pyproject.toml`
+lists it explicitly under `[tool.poetry] packages` alongside `voxity`. A new top-level
 module would need the same treatment.
 
 ### Smoke tests
@@ -88,16 +88,16 @@ cheapest first:
 
 ```
 # 1. pipeline only, no GL at all — the right check for tags/extract/build edits
-./env/bin/python -c "from osmcity import extract; from osmcity.build import build_scene; \
-from osmcity.geo import square_bbox; \
+./env/bin/python -c "from voxity import extract; from voxity.build import build_scene; \
+from voxity.geo import square_bbox; \
 print(build_scene(extract.load('hamburg-260728.osm.pbf', \
 square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 
 # 2. one frame through a standalone EGL context, headless
-./env/bin/osm-city --place rathaus --size 600 --screenshot out.png
+./env/bin/voxity --place rathaus --size 600 --screenshot out.png
 
 # 3. the real window, quits by itself
-./env/bin/osm-city --place rathaus --size 600 --frames 3
+./env/bin/voxity --place rathaus --size 600 --frames 3
 ```
 
 (1) works because `main.run` and `main.render_headless` import moderngl and pygame
@@ -118,22 +118,22 @@ Each stage's output is the next stage's only input; `Scene` (extract.py) is the 
 Everything in a `Scene` is already projected to metres and clipped — build.py never sees
 lon/lat, and renderer.py never sees OSM tags.
 
-- **osmcity/tags.py** — the whole tag vocabulary lives here as module-level tables
+- **voxity/tags.py** — the whole tag vocabulary lives here as module-level tables
   (`ROADS`, `RAILS`, `WATERWAYS`, `SURFACES`, `_SURFACE_RULES`, palettes). Pure functions
   over tag dicts, no numpy, no OSM objects. Add or retune feature types here first.
-- **osmcity/extract.py** — one `osmium.FileProcessor` pass with C++-side key filters,
+- **voxity/extract.py** — one `osmium.FileProcessor` pass with C++-side key filters,
   plus Python-side coarse rejection (`_coarse_reject_*`, sampling 2–3 nodes against a
   padded bbox) because materialising every ring of a city extract is the bottleneck.
   `KEYS` selects which **objects** survive the filter — it does not strip tags, so a
   kept object arrives with its full tag dict.
-- **osmcity/geo.py** — `Projection` (equirectangular around the box centre) and the
+- **voxity/geo.py** — `Projection` (equirectangular around the box centre) and the
   Sutherland-Hodgman / Liang-Barsky clippers.
-- **osmcity/build.py** — `MeshBuilder` accumulates triangle soup; `build_scene` draws
+- **voxity/build.py** — `MeshBuilder` accumulates triangle soup; `build_scene` draws
   ground skirt → surfaces (by layer) → lines (by elev, layer) → buildings.
-- **osmcity/renderer.py** + **shaders.py** — shadow pass, scene pass, instanced trees,
+- **voxity/renderer.py** + **shaders.py** — shadow pass, scene pass, instanced trees,
   fullscreen sky. GLSL lives as strings in shaders.py, sharing a `COMMON_LIGHTING` chunk.
-- **osmcity/camera.py** — matrix helpers (`perspective`, `ortho`, `look_at`, `to_gl`) and
-  the fly camera. **osmcity/hud.py** — pygame-rendered text uploaded as a GL texture.
+- **voxity/camera.py** — matrix helpers (`perspective`, `ortho`, `look_at`, `to_gl`) and
+  the fly camera. **voxity/hud.py** — pygame-rendered text uploaded as a GL texture.
 
 ## Conventions that cut across files
 

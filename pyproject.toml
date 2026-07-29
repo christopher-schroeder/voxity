@@ -1,5 +1,5 @@
 [project]
-name = "osm-city"
+name = "voxity"
 version = "0.1.0"
 description = "Build and fly through a 3D city from an .osm.pbf extract"
 readme = "README.md"
@@ -18,12 +18,12 @@ dependencies = [
 ]
 
 [project.scripts]
-osm-city = "main:main"
+voxity = "main:main"
 
 [tool.poetry]
 # main.py is a top-level module, not a package, so include it explicitly
 packages = [
-    { include = "osmcity" },
+    { include = "voxity" },
     { include = "main.py" },
 ]
 
