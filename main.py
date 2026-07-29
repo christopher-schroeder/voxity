@@ -52,6 +52,7 @@ HELP_LINES = [
     ('[ ]  sun azimuth', True),
     ('T trees  L shadows  G fog', True),
     ('R reset  P screenshot  F1 help', True),
+    ('M  back to the map', True),
     ('ESC  release / quit', True),
 ]
 
@@ -80,7 +81,18 @@ def parse_args(argv=None):
     p.add_argument('--frames', type=int, default=0,
                    help='quit after N frames (smoke test)')
     p.add_argument('--list-places', action='store_true')
+    p.add_argument('--build-map', action='store_true',
+                   help='bake the overview map offscreen and exit')
+    p.add_argument('--no-map', action='store_true',
+                   help='skip the region picker and go straight to the default')
+    p.add_argument('--map-size', type=int, default=None,
+                   help='long edge of the baked overview map in pixels')
     return p.parse_args(argv)
+
+
+def region_given(args):
+    """True when the command line already says where to play."""
+    return bool(args.bbox or args.center or args.place)
 
 
 def resolve_bbox(args):
@@ -148,9 +160,10 @@ def ensure_pbf(args):
     download_pbf(url, args.pbf)
 
 
-def prepare(args):
+def prepare(args, bbox=None):
     ensure_pbf(args)
-    bbox = resolve_bbox(args)
+    if bbox is None:
+        bbox = resolve_bbox(args)
     print(f'bbox  W {bbox[0]:.5f}  S {bbox[1]:.5f}  E {bbox[2]:.5f}  N {bbox[3]:.5f}')
     scene = extract.load(args.pbf, bbox, use_cache=not args.no_cache)
 
@@ -190,22 +203,38 @@ def make_camera(scene, view=None):
     return Camera([cx, alt, cz + back], yaw=yaw, pitch=pitch)
 
 
-def render_headless(args, scene, verts, trees):
+def standalone_context():
+    """An offscreen GL context, EGL first so it works without a display."""
     import moderngl
+
+    for backend in ('egl', None):
+        try:
+            return (moderngl.create_standalone_context(backend=backend)
+                    if backend else moderngl.create_standalone_context())
+        except Exception as exc:                       # noqa: BLE001
+            print(f'  standalone context ({backend}) failed: {exc}')
+    sys.exit('could not create an offscreen GL context')
+
+
+def build_map(args):
+    """Bake the overview map offscreen, then exit. Works headless."""
+    from voxity import overview
+
+    ensure_pbf(args)
+    ctx = standalone_context()
+    kw = {'use_cache': not args.no_cache}
+    if args.map_size:
+        kw['long_edge'] = args.map_size
+    omap = overview.load_or_bake(ctx, args.pbf, **kw)
+    print(f'overview map {omap.size[0]}x{omap.size[1]}  '
+          f'{omap.metres_per_pixel:.1f} m/pixel')
+
+
+def render_headless(args, scene, verts, trees):
     import pygame
     from voxity.renderer import Renderer
 
-    ctx = None
-    for backend in ('egl', None):
-        try:
-            ctx = (moderngl.create_standalone_context(backend=backend)
-                   if backend else moderngl.create_standalone_context())
-            break
-        except Exception as exc:                       # noqa: BLE001
-            print(f'  standalone context ({backend}) failed: {exc}')
-    if ctx is None:
-        sys.exit('could not create an offscreen GL context')
-
+    ctx = standalone_context()
     w, h = args.width, args.height
     colour = ctx.texture((w, h), 4, samples=0)
     depth = ctx.depth_renderbuffer((w, h))
@@ -225,11 +254,10 @@ def render_headless(args, scene, verts, trees):
     print(f'wrote {args.screenshot}')
 
 
-def run(args, scene, verts, trees):
+def open_window(args):
+    """Create the window and GL context. Returns (ctx, size)."""
     import moderngl
     import pygame
-    from voxity.hud import Overlay
-    from voxity.renderer import Renderer
 
     pygame.init()
     pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
@@ -245,12 +273,30 @@ def run(args, scene, verts, trees):
     pygame.display.set_caption('voxity — ' + os.path.basename(args.pbf))
     ctx = moderngl.create_context()
     ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+    return ctx, size
 
+
+def splash(ctx, overlay, size, lines):
+    """Put a message on screen before a long blocking step."""
+    import pygame
+
+    ctx.screen.use()
+    ctx.viewport = (0, 0, *size)
+    ctx.screen.clear(0.06, 0.07, 0.08, 1.0, depth=1.0)
+    overlay.draw(lines, size, 'tl')
+    pygame.display.flip()
+
+
+def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
+    """The 3D loop. Returns 'quit' or 'map' (the player asked to go back)."""
+    import moderngl
+    import pygame
+    from voxity.renderer import Renderer
+
+    ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
     az, el = (float(v) for v in args.sun.split(','))
     renderer = Renderer(ctx, verts, trees, scene.extent, az, el)
     renderer.shadows = not args.no_shadows
-    overlay = Overlay(ctx)
-    help_overlay = Overlay(ctx)
     cam = make_camera(scene, args.view)
     home = (cam.pos.copy(), cam.yaw, cam.pitch)
 
@@ -261,6 +307,7 @@ def run(args, scene, verts, trees):
     show_help = True
     fps = 0.0
     running = True
+    outcome = 'quit'
 
     frame = 0
     while running:
@@ -315,6 +362,9 @@ def run(args, scene, verts, trees):
                                             else default_fog)
                 elif k == pygame.K_F1:
                     show_help = not show_help
+                elif k == pygame.K_m and not args.no_map:
+                    outcome = 'map'
+                    running = False
                 elif k == pygame.K_r:
                     cam.pos, cam.yaw, cam.pitch = home[0].copy(), home[1], home[2]
                 elif k == pygame.K_p:
@@ -353,7 +403,68 @@ def run(args, scene, verts, trees):
             help_overlay.draw(HELP_LINES, size, 'bl')
         pygame.display.flip()
 
+    renderer.release()
+    return outcome
+
+
+def run_windowed(args):
+    """Open the window, then either play the given region or pick one first."""
+    import pygame
+    from voxity.hud import Overlay
+
+    ensure_pbf(args)
+    ctx, size = open_window(args)
+    overlay = Overlay(ctx)
+    help_overlay = Overlay(ctx)
+
+    # An explicit region skips the map entirely, so scripted runs behave
+    # exactly as they did before the map existed.
+    bbox = resolve_bbox(args) if region_given(args) or args.no_map else None
+    omap = None
+
+    while True:
+        if bbox is None:
+            if omap is None:
+                omap = ensure_map(ctx, args, overlay, size)
+            picked = mapview_choose(ctx, omap, size, overlay, help_overlay,
+                                    args)
+            if picked is None:
+                break
+            bbox, args.size = picked
+
+        scene, verts, trees = prepare(args, bbox)
+        size = pygame.display.get_window_size()
+        if fly(ctx, args, scene, verts, trees, overlay, help_overlay, size) \
+                == 'quit':
+            break
+        size = pygame.display.get_window_size()
+        bbox = None
+
     pygame.quit()
+
+
+def ensure_map(ctx, args, overlay, size):
+    """The overview map, baking it (with a message up) if it isn't cached."""
+    from voxity import overview
+
+    long_edge = args.map_size or overview.MAP_LONG_EDGE
+    if not args.no_cache:
+        omap = overview.load(args.pbf, long_edge=long_edge)
+        if omap is not None:
+            return omap
+    splash(ctx, overlay, size, [('baking the overview map...', False),
+                                ('about a minute, once per extract', True)])
+    omap = overview.bake(ctx, args.pbf, long_edge=long_edge)
+    if not args.no_cache:
+        overview.save(omap, args.pbf, long_edge=long_edge)
+    return omap
+
+
+def mapview_choose(ctx, omap, size, overlay, help_overlay, args):
+    from voxity.mapview import choose_region
+
+    return choose_region(ctx, omap, size, overlay, help_overlay,
+                         size_m=args.size, frames=args.frames)
 
 
 def main():
@@ -362,11 +473,16 @@ def main():
         for name, (lat, lon) in sorted(PLACES.items()):
             print(f'  {name:18s} {lat:.4f}, {lon:.4f}')
         return
-    scene, verts, trees = prepare(args)
+    if args.build_map:
+        build_map(args)
+        return
     if args.screenshot:
+        # headless: there is nobody to pick a region, so fall back to the
+        # default square the way it worked before the map existed
+        scene, verts, trees = prepare(args)
         render_headless(args, scene, verts, trees)
-    else:
-        run(args, scene, verts, trees)
+        return
+    run_windowed(args)
 
 
 if __name__ == '__main__':

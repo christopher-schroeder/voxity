@@ -3,15 +3,41 @@
 Builds a 3D city out of an `.osm.pbf` extract and flies you through it.
 pygame for the window and input, moderngl for the rendering.
 
-Give it a coordinate square; it pulls out everything inside, extrudes the
-buildings, lays out the roads and water, and renders the result with a
-shadow-mapped sun.
+Start it with no arguments and you get a flat map of the whole extract — the
+city at a glance, roads and water and parks — to pick your square off. Pick one
+and it pulls out everything inside, extrudes the buildings, lays out the roads
+and water, and renders the result with a shadow-mapped sun.
 
 ```
-./env/bin/voxity --place rathaus --size 1200
+./env/bin/voxity                                  # map, then pick a square
+./env/bin/voxity --place rathaus --size 1200      # straight in
 ./env/bin/voxity --center 53.5503,9.9937 --size 2000
 ./env/bin/voxity --bbox 9.98,53.54,10.00,53.56
 ```
+
+## The map
+
+The overview is baked once per extract and cached in `cache/`, because it means
+walking all 1.5M objects in the file — about 70 seconds for Hamburg. After that
+it loads in a blink. It is a plain PNG, roughly 9 m per pixel, drawn from the
+same OSM tags as the city but in a flat, light palette: water, parks and
+farmland, building footprints as grey masses, and the road network from
+motorway down to tertiary.
+
+The map frames itself on the data rather than on the file's header box. Geofabrik's
+Hamburg extract reaches 100 km west to take in the Neuwerk exclave, and honouring
+that would put the city in a corner of an otherwise empty image.
+
+| | |
+|---|---|
+| move mouse | place the square |
+| wheel | square size (200 m – 8 km) |
+| `ctrl`+wheel, `+` `-` | zoom the map |
+| right-drag, arrows | pan |
+| click, `ENTER` | play here |
+| `ESC` | quit |
+
+In the city, `M` takes you back to the map to pick somewhere else.
 
 ## The extract
 
@@ -54,6 +80,7 @@ built-in `--place` presets are all Hamburg.
 | `[` `]` | sun azimuth |
 | `T` `L` `G` | trees, shadows, fog |
 | `R` | back to the start position |
+| `M` | back to the overview map |
 | `P` | screenshot into `screenshots/` |
 | `F1` | hide the key list |
 | `ESC` | release the mouse, then quit |
@@ -74,6 +101,9 @@ built-in `--place` presets are all Hamburg.
 --no-trees --no-shadows --no-cache
 --screenshot OUT.png   render one frame offscreen and exit
 --frames N        quit after N frames (smoke test)
+--build-map       bake the overview map offscreen and exit
+--map-size PX     long edge of the baked map (default 4096)
+--no-map          skip the picker and use the default square
 ```
 
 `--screenshot` uses an offscreen EGL context, so it works without a display.
@@ -106,6 +136,8 @@ voxity/tags.py     what OSM tags mean: width, height, colour
 voxity/geo.py      local metric projection, polygon/line clipping
 voxity/build.py    features -> triangles (extrusion, ribbons, roofs, trees)
 voxity/renderer.py moderngl passes: shadow map, scene, sky, trees
+voxity/overview.py the whole extract baked into one flat 2D map (cached)
+voxity/mapview.py  picking the region to play on, off that map
 voxity/shaders.py  GLSL
 voxity/camera.py   matrices and the fly camera
 voxity/hud.py      text overlay
@@ -118,8 +150,10 @@ x east, z south, y up.
 
 The first run for a box reads the whole `.pbf` (~15 s for Hamburg). Both the
 extracted features and the built mesh land in `cache/`, so the same square
-opens in a couple of seconds afterwards. `--no-cache` skips it; deleting
-`cache/` is always safe.
+opens in a couple of seconds afterwards. The overview map is cached there too,
+and costs about 70 s the first time. `--no-cache` skips all three — which now
+means re-baking the map as well, so it is a slow flag. Deleting `cache/` is
+always safe.
 
 ## Setup
 

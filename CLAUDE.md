@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A single-binary-ish Python app that reads a square out of an `.osm.pbf` extract, turns
-OSM features into triangles, and flies a camera through them with moderngl. No test
-suite — just `main.py` and the `voxity/` package, Poetry for dependencies, and git
-(`origin` is `github.com:christopher-schroeder/voxity`).
+OSM features into triangles, and flies a camera through them with moderngl. Launched
+without a region it first shows a flat 2D map of the whole extract and lets you pick the
+square to play on. No test suite — just `main.py` and the `voxity/` package, Poetry for
+dependencies, and git (`origin` is `github.com:christopher-schroeder/voxity`).
 
 `.osm.pbf` extracts are **not** in the repo (`.gitignore`), nor is `cache/` or `env/`.
 `main.ensure_pbf` fetches the default extract from Geofabrik on first run, so a fresh
@@ -26,10 +27,17 @@ The environment is `./env`, a **conda environment** with Poetry installed inside
 the project installed **editable** into that same environment:
 
 ```
-./env/bin/voxity --place rathaus --size 1200    # window, fly around
+./env/bin/voxity                                # map first, then pick a square
+./env/bin/voxity --place rathaus --size 1200    # straight into the city
 ./env/bin/voxity --center 53.5503,9.9937 --size 2000
+./env/bin/voxity --no-map                       # skip the picker, default square
 ./env/bin/voxity --list-places                  # 14 Hamburg presets in main.py
 ```
+
+**A region argument suppresses the map.** `--place`/`--center`/`--bbox` (and
+`--screenshot`, which has nobody to click) go straight to the old direct path, so every
+scripted invocation behaves exactly as it did before the picker existed. Only the
+bare-argument case changed, and it used to default to `rathaus`.
 
 `voxity` is a console script pointing at `main:main`; `./env/bin/python main.py ...`
 is equivalent. The **system** `python3` does *not* have moderngl — always go through
@@ -98,6 +106,12 @@ square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 
 # 3. the real window, quits by itself
 ./env/bin/voxity --place rathaus --size 600 --frames 3
+
+# 4. bake the overview map headlessly (EGL, no display needed)
+./env/bin/voxity --build-map --map-size 512
+
+# 5. the map-first startup: picker for 3 frames, then quits
+./env/bin/voxity --frames 3
 ```
 
 (1) works because `main.run` and `main.render_headless` import moderngl and pygame
@@ -106,17 +120,34 @@ GL symlinks above are missing, which is what distinguishes a mesh bug from a con
 bug. (2) is the only check that exercises the shaders without a display; note it renders
 with `dt=0`, so `u_time` stays 0 and the water ripple is frozen, and it ignores
 `--frames`. `--no-cache` forces a full re-extract (~15 s for the Hamburg pbf) when you
-need to test the cold path.
+need to test the cold path. (4) is the way to exercise overview.py headlessly, but note a
+cold bake costs ~55 s **whatever `--map-size` you give**: the time goes on the osmium pass
+and triangulating 400k areas, not on rasterising, so a smaller map buys you a smaller file
+and nothing else. Budget for it rather than assuming a low resolution is quick. (5) covers the
+picker but *not* the selection, since nothing clicks: to test map → play end to end you
+have to `pygame.event.post` a `MOUSEBUTTONDOWN` before calling `mapview.choose_region`,
+then drive `main.fly` the same way. Worth doing — it is the only check that the uv →
+lon/lat → bbox chain comes out the right size and in the right hemisphere.
 
 ## Pipeline
 
+There are **two** pipelines over the same `.osm.pbf`, and they share only tags.py and
+geo.py:
+
 ```
-.osm.pbf → extract.py → Scene → build.py → (verts, tree instances) → renderer.py → GL
+play:  .osm.pbf → extract.py → Scene → build.py → (verts, trees) → renderer.py → GL
+map:   .osm.pbf → overview.py ─────────────────────────────────→ PNG → mapview.py → GL
 ```
 
-Each stage's output is the next stage's only input; `Scene` (extract.py) is the seam.
-Everything in a `Scene` is already projected to metres and clipped — build.py never sees
-lon/lat, and renderer.py never sees OSM tags.
+The play pipeline is the original one: a 1 km-ish square, extruded and lit. Each stage's
+output is the next stage's only input; `Scene` (extract.py) is the seam. Everything in a
+`Scene` is already projected to metres and clipped — build.py never sees lon/lat, and
+renderer.py never sees OSM tags.
+
+The map pipeline covers the *whole extract* at once and deliberately does **not** build a
+`Scene`: 400k areas as Python dicts is the thing to avoid. overview.py streams triangles
+straight into a GPU buffer and flushes when it fills, so peak memory is flat in the size
+of the extract. Its output is a flat PNG, and mapview.py only ever sees that image.
 
 - **voxity/tags.py** — the whole tag vocabulary lives here as module-level tables
   (`ROADS`, `RAILS`, `WATERWAYS`, `SURFACES`, `_SURFACE_RULES`, palettes). Pure functions
@@ -134,8 +165,22 @@ lon/lat, and renderer.py never sees OSM tags.
   fullscreen sky. GLSL lives as strings in shaders.py, sharing a `COMMON_LIGHTING` chunk.
 - **voxity/camera.py** — matrix helpers (`perspective`, `ortho`, `look_at`, `to_gl`) and
   the fly camera. **voxity/hud.py** — pygame-rendered text uploaded as a GL texture.
+- **voxity/overview.py** — bakes the whole extract into one flat PNG. Two passes:
+  `data_bbox` histograms one node per object to find where the data actually *is*, then
+  `bake` streams triangles through `_Batch`. Needs a live GL context, so it is imported
+  lazily; `--build-map` bakes it headlessly through the same EGL path as `--screenshot`.
+- **voxity/mapview.py** — the region picker. Owns its own event loop, returns a lon/lat
+  box, and knows nothing about how the map was made.
 
 ## Conventions that cut across files
+
+**Map orientation is a third coordinate convention, and it flips twice.** overview.py
+bakes with a *negative* y scale so north (−z) lands at the top of the framebuffer, then
+`fbo.read` hands back rows bottom-up, so `OverviewMap.pixels` is GL-order (row 0 =
+south). mapview.py reasons in **top-down uv** — (0,0) is north-west, which is what
+`uv_to_lonlat` expects — and `MAPVIEW_FS` flips `v` on the texture lookup to reconcile
+the two. Get this wrong and the map is mirrored north-south, which looks plausible until
+you notice the Elbe is on the wrong side.
 
 **Coordinates.** `Projection.forward` gives x = east, z = **south** (north is −z), y = up.
 Every `Scene` array is `(x, z)` 2D; build.py lifts it to `(x, y, z)`. Camera yaw 0 looks
@@ -150,8 +195,12 @@ until that test is replaced. Trees are a separate program and buffer entirely
 sees foliage. Changing the layout means touching all three places,
 plus the `'3f 28x'` stride in `scene_depth_vao`.
 
-**Two cache versions, and they are not symmetric.** `extract.CACHE_VERSION` keys the
-pickled `Scene`; `main.MESH_VERSION` keys the `.npz` mesh. Bump `CACHE_VERSION` when
+**Three cache versions, and they are not symmetric.** `extract.CACHE_VERSION` keys the
+pickled `Scene`; `main.MESH_VERSION` keys the `.npz` mesh; `overview.MAP_VERSION` keys
+the baked map PNG, which is on its own branch entirely — it is *not* affected by
+`CACHE_VERSION`, because overview.py never builds a `Scene`. Bump `MAP_VERSION` when
+overview.py or the `MAP_*` tables in tags.py change what the map looks like; a stale map
+is the one cache whose staleness you can actually see. Bump `CACHE_VERSION` when
 extraction or `tags.py` changes what lands in a `Scene`; bump `MESH_VERSION` when
 `build.py` changes geometry. The mesh filename is built from `extract.cache_key(...)`
 *plus* `MESH_VERSION`, and `cache_key` already folds in `CACHE_VERSION` — so bumping
@@ -164,6 +213,12 @@ Deleting `cache/` is always safe.
 `--no-trees` is applied *after* the mesh cache is read (`main.prepare` slices `trees` to
 length zero), so trees are always meshed and stored: changing tree geometry still needs a
 `MESH_VERSION` bump, but toggling the flag never does.
+
+The map key also folds in the pixel long edge, so `--map-size` gets its own file rather
+than silently reusing a differently-sized bake. Re-baking costs about 70 s for Hamburg at
+4096 (10 s to find the data bbox, 60 s for the main pass) and barely less at 512, since
+the cost is per-feature and not per-pixel. That is why `--no-cache` is expensive on the
+map path in a way it never was before.
 
 **Flat geometry is stacked, not depth-tested apart.** Ground layers sit at
 `layer * LAYER_STEP` (0.15 m); the `layer` number comes from the `ROADS`/`SURFACES` tables
@@ -187,7 +242,10 @@ invalidate `Renderer._shadow_key`.
 ## Adding a feature type
 
 1. Add the tag → value entry in `tags.py` (`ROADS`/`SURFACES` + `_SURFACE_RULES`/etc.),
-   including its layer and colour.
+   including its layer and colour. If it should also show on the overview map, give it a
+   `MAP_SURFACES` / `MAP_ROADS` entry — the map reuses `surface_class` to decide *what* a
+   feature is and only overrides the colour, so a new surface class with no `MAP_SURFACES`
+   row is silently invisible on the map.
 2. Only if the feature is *identified* by a key no kept object would already carry, add
    that key to `extract.KEYS` — the osmium `KeyFilter` drops objects carrying none of
    them in C++ before Python sees it. Tags read as *attributes* of an already-kept object
@@ -195,8 +253,9 @@ invalidate `Renderer._shadow_key`.
    `width` and the colour tags are all absent from `KEYS` and work fine.
 3. Route it in `extract._area` or `extract._way` if it isn't already covered by
    `surface_class` / the `ROADS`-`RAILS`-`WATERWAYS` lookup.
-4. Bump `CACHE_VERSION` (and `MESH_VERSION` if build.py changed), then verify with
-   `--screenshot`.
+4. Bump `CACHE_VERSION` (and `MESH_VERSION` if build.py changed, and `MAP_VERSION` if it
+   shows on the map), then verify with `--screenshot` and, if the map changed,
+   `--build-map --map-size 512`.
 
 ## Style
 

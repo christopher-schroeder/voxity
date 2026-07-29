@@ -219,6 +219,82 @@ void main() {
 }
 """
 
+# --- overview map ----------------------------------------------------------
+
+# Baking the map: flat colour, no lighting, orthographic from straight above.
+# `u_xform` is (scale_x, scale_y, offset_x, offset_y) taking metres to NDC; the
+# y scale is negative because world z runs south and the map wants north up.
+# The layer becomes depth, so features can be streamed to the GPU in whatever
+# order osmium hands them over and still stack correctly.
+MAP_VS = """#version 330 core
+in vec2 in_pos;
+in vec3 in_col;
+in float in_layer;
+uniform vec4 u_xform;
+uniform float u_layers;
+out vec3 v_col;
+void main() {
+    v_col = in_col;
+    float z = 1.0 - 2.0 * (in_layer + 1.0) / u_layers;
+    gl_Position = vec4(in_pos * u_xform.xy + u_xform.zw, z, 1.0);
+}
+"""
+
+MAP_FS = """#version 330 core
+in vec3 v_col;
+out vec4 f_color;
+void main() { f_color = vec4(v_col, 1.0); }
+"""
+
+# Viewing the baked map: a textured quad with pan/zoom, plus the selection
+# square drawn in the same pass — a screen-space border test is cheaper than a
+# second VAO and keeps the outline exactly one pixel band wide at any zoom.
+MAPVIEW_VS = """#version 330 core
+in vec2 in_pos;
+uniform vec4 u_view;          // (scale_x, scale_y, offset_x, offset_y)
+out vec2 v_uv;
+void main() {
+    v_uv = in_pos * u_view.xy + u_view.zw;
+    gl_Position = vec4(in_pos * 2.0 - 1.0, 0.0, 1.0);
+}
+"""
+
+MAPVIEW_FS = """#version 330 core
+in vec2 v_uv;
+out vec4 f_color;
+uniform sampler2D u_tex;
+uniform vec4 u_sel;           // selection in uv space (x0, y0, x1, y1)
+uniform vec2 u_border;        // border half-thickness in uv
+uniform vec3 u_edge_col;
+void main() {
+    vec3 col;
+    if (min(v_uv.x, v_uv.y) < 0.0 || max(v_uv.x, v_uv.y) > 1.0) {
+        col = vec3(0.16, 0.17, 0.19);          // outside the baked map
+    } else {
+        // v_uv has v=0 at north, which is how the picker reasons about the
+        // map; the texture itself is stored bottom-up, so flip on lookup
+        col = texture(u_tex, vec2(v_uv.x, 1.0 - v_uv.y)).rgb;
+    }
+
+    bool inside = v_uv.x > u_sel.x && v_uv.x < u_sel.z &&
+                  v_uv.y > u_sel.y && v_uv.y < u_sel.w;
+    // distance to the nearest selection edge, per axis
+    vec2 dx = vec2(abs(v_uv.x - u_sel.x), abs(v_uv.x - u_sel.z));
+    vec2 dy = vec2(abs(v_uv.y - u_sel.y), abs(v_uv.y - u_sel.w));
+    bool on_v = min(dx.x, dx.y) < u_border.x &&
+                v_uv.y > u_sel.y - u_border.y && v_uv.y < u_sel.w + u_border.y;
+    bool on_h = min(dy.x, dy.y) < u_border.y &&
+                v_uv.x > u_sel.x - u_border.x && v_uv.x < u_sel.z + u_border.x;
+
+    if (on_v || on_h) {
+        col = u_edge_col;
+    } else if (!inside) {
+        col = mix(col, vec3(0.10, 0.11, 0.13), 0.28);   // dim what you can't play
+    }
+    f_color = vec4(col, 1.0);
+}
+"""
+
 OVERLAY_VS = """#version 330 core
 in vec2 in_pos;
 in vec2 in_uv;

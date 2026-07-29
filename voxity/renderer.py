@@ -74,8 +74,9 @@ class Renderer:
             self.depth_prog, [(self.vbo, '3f 28x', 'in_pos')])
 
         quad = np.array([-1, -1, 3, -1, -1, 3], dtype='f4')
+        self.sky_vbo = ctx.buffer(quad.tobytes())
         self.sky_vao = ctx.vertex_array(
-            self.sky_prog, [(ctx.buffer(quad.tobytes()), '2f', 'in_pos')])
+            self.sky_prog, [(self.sky_vbo, '2f', 'in_pos')])
 
         self._init_trees(trees)
 
@@ -114,6 +115,22 @@ class Renderer:
             (self.tree_inst_vbo, '2f 1f 1f 4x/i',
              'in_offset', 'in_height', 'in_radius'),
         ])
+
+    def release(self):
+        """Give the GPU objects back.
+
+        Only matters because the region can be re-picked without restarting:
+        without this, every trip back to the overview map would leak a whole
+        city's worth of vertex buffers.
+        """
+        for obj in (self.scene_vao, self.scene_depth_vao, self.sky_vao,
+                    self.tree_vao, self.tree_depth_vao,
+                    self.vbo, self.sky_vbo, self.tree_mesh_vbo,
+                    self.tree_inst_vbo,
+                    self.shadow_fbo, self.shadow_tex,
+                    self.scene_prog, self.depth_prog, self.sky_prog,
+                    self.tree_prog, self.tree_depth_prog):
+            obj.release()
 
     # -- lighting ------------------------------------------------------------
 

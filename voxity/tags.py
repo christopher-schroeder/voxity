@@ -46,6 +46,88 @@ WATERWAYS = {
     'ditch': 2.5, 'drain': 2.5, 'fairway': 40.0,
 }
 
+# --- overview map ----------------------------------------------------------
+#
+# The zoomed-out 2D map is a different visual problem from the 3D city: it is
+# lit by nothing, read at a glance, and every feature is a few pixels wide. So
+# it gets its own flat, light palette rather than reusing the scene colours,
+# which are tuned to be shaded and would read as mud at this scale.
+#
+# MAP_LAYER orders the painting; higher wins. It is a *separate* axis from the
+# scene's LAYER_STEP stacking — overview.py turns it into a depth value.
+
+MAP_BACKGROUND = (0.94, 0.93, 0.90)
+MAP_LAYERS = 10                      # exclusive upper bound, for depth scaling
+
+# surface class (as returned by surface_class) -> (map layer, rgb)
+MAP_SURFACES = {
+    'residential': (1, (0.91, 0.90, 0.88)),
+    'commercial':  (1, (0.91, 0.89, 0.87)),
+    'industrial':  (1, (0.89, 0.88, 0.88)),
+    'retail':      (1, (0.92, 0.89, 0.87)),
+    'railway':     (1, (0.89, 0.88, 0.88)),
+    'construction': (1, (0.92, 0.90, 0.85)),
+    'farmland':    (2, (0.93, 0.91, 0.81)),
+    'wood':        (2, (0.78, 0.86, 0.75)),
+    'grass':       (2, (0.84, 0.91, 0.79)),
+    'scrub':       (2, (0.86, 0.90, 0.79)),
+    'cemetery':    (2, (0.85, 0.89, 0.81)),
+    'wetland':     (2, (0.85, 0.89, 0.83)),
+    'sand':        (2, (0.94, 0.90, 0.77)),
+    'rock':        (2, (0.90, 0.89, 0.87)),
+    'pitch':       (3, (0.80, 0.89, 0.77)),
+    'parking':     (3, (0.92, 0.91, 0.89)),
+    'paved':       (3, (0.93, 0.92, 0.90)),
+    'water':       (4, (0.68, 0.80, 0.89)),
+}
+
+MAP_BUILDING = (5, (0.85, 0.82, 0.79))
+MAP_RAIL = (6, 8.0, 2.0, (0.76, 0.75, 0.75))     # layer, metres, min px, rgb
+
+# highway value -> (layer, width in metres, minimum width in pixels, rgb)
+# The pixel floor is what keeps the road network legible: at city zoom a real
+# 14 m motorway is a third of a pixel, so the drawn width is whichever of the
+# two is larger once the map's metres-per-pixel is known.
+MAP_ROADS = {
+    'motorway':       (9, 44.0, 2.6, (0.97, 0.72, 0.45)),
+    'motorway_link':  (8, 26.0, 1.6, (0.97, 0.76, 0.52)),
+    'trunk':          (9, 38.0, 2.4, (0.98, 0.78, 0.52)),
+    'trunk_link':     (8, 24.0, 1.5, (0.98, 0.81, 0.58)),
+    'primary':        (8, 32.0, 2.0, (0.99, 0.86, 0.60)),
+    'primary_link':   (7, 20.0, 1.3, (0.99, 0.88, 0.66)),
+    'secondary':      (7, 26.0, 1.6, (1.00, 0.94, 0.72)),
+    'secondary_link': (7, 17.0, 1.1, (1.00, 0.95, 0.78)),
+    'tertiary':       (7, 20.0, 1.2, (1.00, 0.99, 0.92)),
+    'tertiary_link':  (7, 14.0, 1.0, (1.00, 0.99, 0.94)),
+}
+
+
+def map_surface(tags):
+    """(layer, rgb) for an area on the overview map, or None to skip it.
+
+    Reuses `surface_class` so the map and the city agree on what a feature
+    *is*; only the colour differs.
+    """
+    cls = surface_class(tags)
+    if cls is None:
+        return None
+    return MAP_SURFACES.get(cls)
+
+
+def map_way(tags):
+    """(layer, width_m, min_px, rgb) for a line on the overview map, else None."""
+    hw = tags.get('highway')
+    if hw in MAP_ROADS:
+        return MAP_ROADS[hw]
+    rw = tags.get('railway')
+    if rw in ('rail', 'light_rail'):
+        layer, width, min_px, rgb = MAP_RAIL
+        return (layer, width, min_px, rgb)
+    wy = tags.get('waterway')
+    if wy in ('river', 'canal'):
+        return (4, WATERWAYS[wy], 1.2, MAP_SURFACES['water'][1])
+    return None
+
 # surface class -> (layer, rgb).  Layer 0 is the base ground plane.
 SURFACES = {
     'water':       (3, (0.20, 0.35, 0.47)),
