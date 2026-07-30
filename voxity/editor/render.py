@@ -13,7 +13,11 @@ import numpy as np
 from .. import shaders, voxel
 from ..camera import to_gl
 
-GRID_HALF = 16          # floor grid spans -GRID_HALF .. +GRID_HALF cells
+# The floor grid is drawn in **metres**, not cells: at a quarter-metre cell a
+# line per cell over a house-sized area is thousands of lines that read as a
+# solid grey sheet, and the thing you actually want to judge against is a metre.
+GRID_HALF_M = 16.0      # the grid spans this far either side of the origin
+GRID_STEP_M = 1.0       # one line per metre
 GRID_COL = (0.30, 0.30, 0.34)
 AXIS_X_COL = (0.55, 0.30, 0.30)
 AXIS_Z_COL = (0.30, 0.30, 0.55)
@@ -25,16 +29,23 @@ FOOT_EDGE_COL = (0.45, 0.95, 0.60)
 WIRE_COL = (0.06, 0.06, 0.08)   # the triangle overlay, dark against every hue
 
 
-def _grid_lines():
-    """Line segments for the floor grid, with brighter centre axes."""
+def _grid_lines(cell=None):
+    """Line segments for the floor grid, with brighter centre axes.
+
+    Positions are in cells, because that is what the model is in; the spacing
+    comes from metres.
+    """
+    cell = voxel.CELL_M if cell is None else cell
+    half = max(1, round(GRID_HALF_M / cell))
+    step = max(1, round(GRID_STEP_M / cell))
     seg = []
-    for i in range(-GRID_HALF, GRID_HALF + 1):
+    for i in range(-half, half + 1, step):
         if i == 0:
             continue
-        seg += [(i, 0, -GRID_HALF, *GRID_COL), (i, 0, GRID_HALF, *GRID_COL)]
-        seg += [(-GRID_HALF, 0, i, *GRID_COL), (GRID_HALF, 0, i, *GRID_COL)]
-    seg += [(-GRID_HALF, 0, 0, *AXIS_X_COL), (GRID_HALF, 0, 0, *AXIS_X_COL)]
-    seg += [(0, 0, -GRID_HALF, *AXIS_Z_COL), (0, 0, GRID_HALF, *AXIS_Z_COL)]
+        seg += [(i, 0, -half, *GRID_COL), (i, 0, half, *GRID_COL)]
+        seg += [(-half, 0, i, *GRID_COL), (half, 0, i, *GRID_COL)]
+    seg += [(-half, 0, 0, *AXIS_X_COL), (half, 0, 0, *AXIS_X_COL)]
+    seg += [(0, 0, -half, *AXIS_Z_COL), (0, 0, half, *AXIS_Z_COL)]
     return np.array(seg, dtype='f4')
 
 

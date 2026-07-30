@@ -33,12 +33,27 @@ from . import voxel
 
 OUT_DIR = 'models/houses'
 
-STOREY = 3                    # cells per storey; a cell is a metre
+# Everything dimensional here is **metres**, converted to cells against
+# `voxel.CELL_M` at the point of use. It used to be cells, which was the same
+# thing while a cell was a metre and quietly became a house with 25 cm storeys
+# when it stopped being one.
+STOREY_M = 3.0                # floor to floor
+PLINTH_M = 0.5                # the base course the walls stand on
+WINDOW_W_M, WINDOW_H_M = 1.0, 1.4
+WINDOW_SILL_M = 0.9           # above the floor of its storey
+WINDOW_PITCH_M = 2.4          # centre to centre along a wall
+DOOR_W_M, DOOR_H_M = 1.0, 2.1
+ROOF_MAX_M = 3.5              # a roof may rise this far before it is cut flat
+
 MIN_STOREYS, MAX_STOREYS = 1, 5
 VARIANTS = 5                  # models written per footprint
-ROOF_MAX = 6                  # cells a roof may rise before it is cut flat
 
 STYLES = ('gabled', 'hipped', 'flat')
+
+
+def _cells(metres, cell, least=1):
+    """`metres` as a whole number of cells, never below `least`."""
+    return max(least, round(metres / cell))
 
 # Hue indices into voxel's 32-step wheel; saturation and value are not ours to
 # choose (see voxel.py), so hue is the only thing that tells two parts apart.
@@ -111,7 +126,7 @@ def span(cells):
 
 # --- the parts --------------------------------------------------------------
 
-def roof(cells, y, style, hue, rise=ROOF_MAX):
+def roof(cells, y, style, hue, rise, parapet=1):
     """Voxels of a roof standing on `cells` with its deck at height `y`.
 
     `rise` cuts the pitch off flat. Left to run, erosion stops only when the
@@ -120,8 +135,9 @@ def roof(cells, y, style, hue, rise=ROOF_MAX):
     """
     out = {(x, y, z): hue for x, z in cells}
     if style == 'flat':
-        for x, z in perimeter(cells):
-            out[(x, y + 1, z)] = hue        # a parapet, so it reads as a roof
+        for x, z in perimeter(cells):       # a parapet, so it reads as a roof
+            for j in range(1, parapet + 1):
+                out[(x, y + j, z)] = hue
         return out
     axis = None
     if style == 'gabled':
@@ -137,17 +153,29 @@ def roof(cells, y, style, hue, rise=ROOF_MAX):
     return out
 
 
-def add_windows(v, cells, walls, storeys, hue, phase):
-    """A band of windows per storey, on the straight parts of every wall."""
+def add_windows(v, cells, walls, storeys, hue, phase, cell, base):
+    """A band of windows per storey, on the straight parts of every wall.
+
+    A window is a rectangle of cells now rather than the single cell it was at a
+    metre per cell — 1.0 by 1.4 m, repeating every 2.4 m along the wall, with
+    its sill 0.9 m above its own floor.
+    """
+    storey = _cells(STOREY_M, cell)
+    ww, wh = _cells(WINDOW_W_M, cell), _cells(WINDOW_H_M, cell)
+    pitch = max(ww + 1, _cells(WINDOW_PITCH_M, cell))
+    sill = _cells(WINDOW_SILL_M, cell)
     for s in range(storeys):
-        y = 1 + s * STOREY + 1              # middle row of the storey
+        y0 = base + s * storey + sill
         for c in walls:
             a = wall_axis(c, cells)
-            if a is not None and (c[a] + phase) % 2 == 0:
-                v[(c[0], y, c[1])] = hue
+            # `c[a]` runs along the wall, so one modulo puts a window every
+            # `pitch` cells and keeps it `ww` cells wide wherever the wall goes
+            if a is not None and (c[a] + phase) % pitch < ww:
+                for j in range(wh):
+                    v[(c[0], y0 + j, c[1])] = hue
 
 
-def add_door(v, cells, walls, hue):
+def add_door(v, cells, walls, hue, cell, base):
     """One door, in the middle of the furthest wall that faces +z.
 
     Placed rather than drawn from the rng: a door is the one feature read as
@@ -162,40 +190,66 @@ def add_door(v, cells, walls, hue):
     z = max(c[1] for c in front)
     row = sorted(c[0] for c in front if c[1] == z)
     x = row[len(row) // 2]
-    for y in (1, 2):
-        v[(x, y, z)] = hue
+    dw, dh = _cells(DOOR_W_M, cell), _cells(DOOR_H_M, cell)
+    for i in range(dw):
+        cx = x - dw // 2 + i
+        if (cx, z) not in cells:
+            continue
+        for y in range(base, base + dh):
+            v[(cx, y, z)] = hue
 
 
 # --- a whole house ----------------------------------------------------------
 
-def house(cells, storeys=2, style='gabled', seed=0):
-    """A default house standing on `cells`, as `{(x, y, z): hue}`.
+def palette(seed):
+    """The four hues one house is built from, as {'wall', 'roof', 'glass', 'door'}.
 
-    Hollow on purpose: only the perimeter carries walls, so what is written is
-    roughly what you can see. The plinth at y=0 is solid, which is what stops
-    you looking up into an empty shell from below.
+    Split out of `house` so it can be checked on its own: the wall hue is not
+    recoverable from a finished model — the plinth takes the roof's hue and is a
+    solid slab, so on a low house the commonest hue in the model is the roof.
     """
     rng = np.random.default_rng(seed)
     wall = int(rng.choice(WALL_HUES))
-    roof_hue = int(rng.choice(contrast(wall, ROOF_HUES)))
-    glass = int(rng.choice(contrast(wall, GLASS_HUES)))
-    door = int(rng.choice(contrast(wall, DOOR_HUES)))
-    phase = int(rng.integers(0, 2))
+    return {'wall': wall,
+            'roof': int(rng.choice(contrast(wall, ROOF_HUES))),
+            'glass': int(rng.choice(contrast(wall, GLASS_HUES))),
+            'door': int(rng.choice(contrast(wall, DOOR_HUES)))}
+
+
+def house(cells, storeys=2, style='gabled', seed=0, cell=voxel.CELL_M):
+    """A default house standing on `cells`, as `{(x, y, z): hue}`.
+
+    Hollow on purpose: only the perimeter carries walls, so what is written is
+    roughly what you can see. The plinth is solid, which is what stops you
+    looking up into an empty shell from below.
+    """
+    hues = palette(seed)
+    wall, roof_hue = hues['wall'], hues['roof']
+    glass, door = hues['glass'], hues['door']
+    rng = np.random.default_rng(seed + 7919)
+
+    storey = _cells(STOREY_M, cell)
+    plinth = _cells(PLINTH_M, cell)
+    phase = int(rng.integers(0, max(2, _cells(WINDOW_PITCH_M, cell))))
 
     cells = set(cells)
     walls = perimeter(cells)
     # the plinth takes the roof's hue rather than one of its own: a course of
     # the roof material at the base reads as a base, while a third colour down
     # there reads as a band of something growing round the house
-    v = {(x, 0, z): roof_hue for x, z in cells}
-    top = storeys * STOREY
-    for y in range(1, top + 1):
+    v = {(x, y, z): roof_hue for x, z in cells for y in range(plinth)}
+    top = plinth + storeys * storey
+    for y in range(plinth, top):
         for x, z in walls:
             v[(x, y, z)] = wall
-    add_windows(v, cells, walls, storeys, glass, phase)
-    add_door(v, cells, walls, door)
-    v.update(roof(cells, top + 1, style, roof_hue,
-                  min(ROOF_MAX, max(2, top // 3))))
+    add_windows(v, cells, walls, storeys, glass, phase, cell, plinth)
+    add_door(v, cells, walls, door, cell, plinth)
+    # the pitch is capped by the wall it stands on as well as in metres, so a
+    # bungalow does not disappear under its own roof
+    rise = min(_cells(ROOF_MAX_M, cell),
+               max(_cells(0.5, cell), (top - plinth) // 3))
+    v.update(roof(cells, top, style, roof_hue, rise,
+                  parapet=_cells(0.4, cell)))
     return v
 
 
@@ -205,7 +259,7 @@ def height(voxels):
     return 0 if b is None else b[1][1]
 
 
-def variants(cells, count=VARIANTS, seed=0):
+def variants(cells, count=VARIANTS, seed=0, cell=voxel.CELL_M):
     """`count` default houses for one footprint, as dicts describing each.
 
     Storeys walk the range instead of being drawn, so a plan always gets one
@@ -216,7 +270,7 @@ def variants(cells, count=VARIANTS, seed=0):
     for i in range(count):
         storeys = MIN_STOREYS + i % steps
         style = STYLES[i % len(STYLES)]
-        v = house(cells, storeys, style, seed + i)
+        v = house(cells, storeys, style, seed + i, cell)
         out.append({'voxels': v, 'storeys': storeys, 'style': style,
                     'height': height(v), 'variant': i})
     return out
@@ -227,7 +281,8 @@ def seed_for(name):
     return int(hashlib.sha1(name.encode()).hexdigest()[:8], 16)
 
 
-def write(entries, out_dir=OUT_DIR, count=VARIANTS, verbose=True):
+def write(entries, out_dir=OUT_DIR, count=VARIANTS, cell=voxel.CELL_M,
+          verbose=True):
     """Write `count` houses for each footprint in `entries` (see footprints.list_models).
 
     Every house records its footprint, which is what makes it re-openable in the
@@ -239,12 +294,13 @@ def write(entries, out_dir=OUT_DIR, count=VARIANTS, verbose=True):
     written = []
     for e in entries:
         stem = e['name'][:-5].replace('footprint-', '')
-        for h in variants(e['cells'], count, seed_for(e['name'])):
+        for h in variants(e['cells'], count, seed_for(e['name']), cell):
             name = f'house-{stem}-{h["variant"]}-{h["style"]}.json'
             voxel.save(h['voxels'], os.path.join(out_dir, name), e['cells'])
             written.append(dict(h, file=name, plan=e['name']))
         if verbose:
-            hs = ', '.join(str(h['height']) for h in written[-count:])
+            hs = ', '.join(f'{h["height"] * cell:.0f}m'
+                           for h in written[-count:])
             print(f'  {e["name"]:34s} {count} houses, heights {hs}')
     if verbose:
         print(f'  wrote {len(written)} houses for {len(entries)} footprints '

@@ -27,7 +27,8 @@ voxel house instead of an extruded block.
 ## The editor
 
 Unit cubes on a grid, an orbiting camera, and a brush that stamps a solid box
-of them. The box is sized **per axis**, 1 to 32 cells each — walls, floors and
+of them. **A cell is 25 cm**, so a storey is twelve of them and a window four
+across — the floor grid is drawn one line per metre to keep that readable. The box is sized **per axis**, 1 to 32 cells each — walls, floors and
 pillars are the shapes you actually build, and none of them is a cube — with a
 `- n +` stepper per dimension under the palette. You pick the **hue**; the
 brightness is not yours to choose — it is a hash of the cell's position, so
@@ -139,20 +140,29 @@ of a family join it, and what gets written is the shape a **majority of the
 family's members agree on** cell by cell, not any single building. So a ragged
 survey of near-identical semi-detached houses comes out as one clean plan.
 
+Everything here is measured against the **25 cm cell** (`voxel.CELL_M`), which
+is the one place the size of a voxel is decided. Changing it invalidates the
+survey, every model on disk and every cached city mesh, and means re-running
+`--build-footprints` and `--build-houses` — the survey's cache key folds the
+cell in, so it will not quietly reuse the old one.
+
 Output lands in `models/footprints/`: a model per shape and size, an
 `index.json` recording how many buildings each stands for, and a `sheet.png`
 contact sheet to look at them all at once. It is work product, not a cache —
 nothing deletes it, and a re-run overwrites the models in place, so move
 anything you have started building out of there first.
 
-The first run reads all 355k buildings and takes about **4 to 5 minutes**. The
+The first run reads all 355k buildings and takes about **6 minutes**. The
 survey is cached after that, so retuning how shapes are grouped re-runs in two
 seconds — which is the point of caching the masks rather than the result.
 
 ## Houses in the city
 
 `--build-houses` stands a few default houses on every footprint the survey
-found, and the city then puts them back on the buildings they came from.
+found, and the city then puts them back on the buildings they came from. They
+are built to real proportions — a 3 m storey, a 1 x 1.4 m window every 2.4 m —
+against the 25 cm cell, and written out as boxes rather than one row per voxel,
+which is the difference between 20 kB a house and 180.
 
 ```
 ./env/bin/voxity --build-houses          # writes models/houses/
@@ -368,7 +378,7 @@ x east, z south, y up. The editor works in unit cells with the same axes.
 
 ## The look
 
-The city is graded for a warm late afternoon. Everything is drawn into an
+The city is graded for bright daylight. Everything is drawn into an
 offscreen buffer in linear light and only turned into a picture at the end,
 which is what lets **ambient occlusion** darken the light itself rather than the
 image of it — so walls meet the ground in a soft shadow, eaves and voxel steps
@@ -382,9 +392,10 @@ costs roughly a third of the frame rate, and `--supersample 1` turns it off.
 Ambient occlusion is free by comparison; `--no-ao` and the `O` key are there to
 see what it is doing, not to speed anything up.
 
-The sun stays warm at every height it can be at, rather than going neutral at
-midday the way a physical model would. Sun position is still `--sun AZ,EL` and
-`,` `.` `[` `]` still move it, but the look is built around the default.
+The default sun is high and near-white. Winding its elevation down with `,`
+warms the whole palette towards a golden hour rather than merely dimming it, so
+`--sun 240,20` is a sunset and `--sun 215,52` is the daylight the look is built
+around. `[` `]` swing it round.
 
 ## Caching
 

@@ -75,9 +75,9 @@ def parse_args(argv=None):
                         'map picker\'s grid cells (default 1200)')
     p.add_argument('--width', type=int, default=1600)
     p.add_argument('--height', type=int, default=950)
-    p.add_argument('--sun', default='240,28',
-                   help='AZIMUTH,ELEVATION in degrees (default is late afternoon:\n'
-                        'low and warm, which is what the look is built around)')
+    p.add_argument('--sun', default='215,52',
+                   help='AZIMUTH,ELEVATION in degrees (default is midday; wind the '
+                        'elevation down and the palette warms towards a sunset)')
     p.add_argument('--no-trees', action='store_true')
     p.add_argument('--no-shadows', action='store_true')
     p.add_argument('--no-ao', action='store_true',
@@ -106,8 +106,9 @@ def parse_args(argv=None):
                    help='voxel cell size in metres for the footprints')
     p.add_argument('--footprint-count', type=int, default=16,
                    help='how many shape families to write')
-    p.add_argument('--footprint-sizes', type=int, default=2,
-                   help='how many real sizes of each shape to write')
+    p.add_argument('--footprint-sizes', type=int, default=3,
+                   help='how many real sizes of each shape to write; this is '
+                        'what caps how many buildings can be matched at all')
     p.add_argument('--footprint-iou', type=float, default=footprints.IOU_JOIN,
                    help='overlap at which two footprints count as one shape')
     p.add_argument('--footprint-dir', default=footprints.OUT_DIR,
@@ -206,7 +207,10 @@ def prepare(args, bbox=None):
     # the cache key folds in the directory itself. '-flat' keys the run that
     # extrudes everything, since that cannot be recovered from a cached mesh the
     # way --no-trees can be.
-    houses = 'flat' if args.no_voxel_houses else place.signature(args.house_dir)
+    # The cell size is not in any version constant and changes what a placed
+    # house *is*, so it goes in the key beside the house directory's digest.
+    houses = ('flat' if args.no_voxel_houses
+              else f'{place.signature(args.house_dir)}c{voxel.CELL_M:g}')
 
     mesh_file = None
     if not args.no_cache:
@@ -284,7 +288,8 @@ def build_footprints(args):
                                              use_cache=not args.no_cache)
     if not counts:
         sys.exit('no usable building footprints in the extract')
-    fams = footprints.families(counts, areas, iou_join=args.footprint_iou)
+    fams = footprints.families(counts, areas, iou_join=args.footprint_iou,
+                               cell=cell)
     footprints.write(fams, args.footprint_dir, cell,
                      {'pbf': os.path.basename(args.pbf), 'buildings': seen,
                       'footprints': sum(counts.values()),
@@ -305,7 +310,7 @@ def build_houses(args):
     if not entries:
         sys.exit(f'no footprints in {args.footprint_dir}/ — run '
                  f'--build-footprints first')
-    houses.write(entries, args.house_dir, args.house_variants)
+    houses.write(entries, args.house_dir, args.house_variants, args.footprint_cell)
 
 
 def tune_renderer(r, args):

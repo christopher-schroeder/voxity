@@ -242,12 +242,17 @@ instead of extruding it. A building that matches nothing is extruded exactly as 
 so the city degrades to what it was rather than to holes in the ground.
 
 **Coverage is bounded by how many footprints exist, not by the matcher.** A plan matches
-a building only at its own size (±`ALIGN_MARGIN`), so the number of *concrete sizes* the
-survey wrote is the ceiling. At the defaults (16 families × 2 sizes = 32 plans) about 10%
-of buildings get a house; `--footprint-sizes 8` (120 plans) takes it to ~23%. Raising
-`--footprint-count` instead barely helps — see "Retuning the footprint survey" for why
-the two axes are not interchangeable. Lowering `place.MATCH_IOU` is the wrong knob: it
-buys coverage by putting houses on buildings whose walls are somewhere else.
+a building only at its own size (± `MATCH_MARGIN_M`), so the number of *concrete sizes*
+the survey wrote is the ceiling. At the defaults (16 families × 3 sizes = 48 plans) about
+11% of buildings get a house; measured at 1 m per cell, going to 8 sizes took it to ~23%.
+Raising `--footprint-count` instead barely helps — see "Retuning the footprint survey"
+for why the two axes are not interchangeable. Lowering `place.MATCH_IOU` is the wrong
+knob: it buys coverage by putting houses on buildings whose walls are somewhere else.
+
+Matching costs about **7 ms a building** at a quarter-metre cell (roughly 5 s for a
+750-building square), against 1.5 ms at a metre: the masks are sixteen times the cells and
+the margin is 3 cells rather than 1, so `align` tries 49 offsets instead of 9. It is
+behind the mesh cache, so a square pays once.
 
 The voxel pipeline exists twice on purpose. `voxel.mesh_vertices` emits the **shared
 layout from mesh.py**, so a model can go into a city's buffer and be lit by its sun and
@@ -307,8 +312,9 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
 - **voxity/houses.py** — the default house generator. Walls are the footprint's
   perimeter and roofs are repeated **erosion** of the plan, which is what makes them work
   on an L or an octagon and not just a box; models are hollow, since the interior is a
-  sealed cavity `voxel.exterior_air` drops anyway. No GL, no pygame, and no OSM — it only
-  reads and writes models.
+  sealed cavity `voxel.exterior_air` drops anyway. Every dimension is a metre constant
+  converted through `_cells`. No GL, no pygame, and no OSM — it only reads and writes
+  models.
 - **voxity/place.py** — the runtime match. Reuses `footprints.footprint_mask` for the
   building and `footprints.align` for the fit, so there is exactly one rasteriser. Meshes
   each house once per dihedral transform and reuses it across every building of that
@@ -334,6 +340,56 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   once in `__init__` — anything that changes `size_m` later has to recompute all three.
   The grid and the selected cell are drawn by `MAPVIEW_FS` from uniforms, not as
   geometry, so a 31 × 30 grid costs no more than a 1 × 1 one.
+
+## How big a voxel is
+
+**`voxel.CELL_M` is the one place that decides, and it is 0.25 m.** Everything else
+derives from it: the survey rasterises at it, a house is proportioned against it,
+`place.py` meshes at it, and `Renderer.voxel_cell` is set from it. They all have to
+agree — the shader's mosaic is a hash of the *world* cell, so a model meshed at one size
+dropped into a scene set to another stops lining up with its own geometry.
+
+Changing it invalidates the footprint survey (its cache key folds the cell in), every
+model on disk, and every cached city mesh (`main.prepare` puts the cell in the mesh key
+beside the house directory's digest).
+
+**Anything dimensional is stated in metres and converted at the point of use.** This is
+the trap the whole rescale was: while a cell was a metre, "3 cells per storey", "1 cell of
+slack", "64 cells maximum span" and "a cell is its own size bin" were all secretly
+metres, and turning the grid up four times silently made them a 75 cm storey, 25 cm of
+slack, a 16 m cap, and a size bin four times too fine. The constants that had to move,
+and what each would have broken:
+
+* `houses.STOREY_M` and the rest of its dimensions — otherwise every house is a quarter
+  of its proper height.
+* `footprints.MAX_SPAN_M` — as cells it becomes a 16 m cap and throws away most of the
+  city.
+* `footprints.MATCH_MARGIN_M` (via `match_margin`) — slack for fitting two *real* masks,
+  used by `Family.consensus` and by `place.Library`. As a cell count the whole pipeline
+  gets four times fussier about what counts as the same building. Note this is **not**
+  `ALIGN_MARGIN`, which is in cells of a *normalised* mask and correctly does not scale.
+* `footprints.SIZE_BIN_M` (via `size_bin`) — a family's real sizes are counted in 0.5 m
+  bins rather than per exact cell dimension. Without it two buildings 30 cm apart in width
+  land in different bins, each family's modal size collects a fraction of the members it
+  should, and `consensus` ends up voting on a single building.
+
+`footprints.SUPERSAMPLE` goes the other way and drops to 1 at a fine cell: half-coverage
+needed estimating when a cell was a metre, but at a quarter of one the cell is already
+smaller than any feature of a building outline, so the centre sample says the same thing
+for a sixteenth of the work.
+
+**Models are written as boxes, not cells.** A three-storey house is 24,000 voxels at this
+size, which is 180 kB of JSON one per row. `voxel.boxes` greedily covers them with
+same-hue axis-aligned boxes — about 120 of them — and `voxel.save` writes those. This
+needed no change to `load`: the 5-element `[x, y, z, size, hue]` row was already the
+format for a sized voxel and `block_cells` already took a triple. Only `y >= 0` is
+merged, because `block_cells` refuses negative y and a box spanning it would not survive
+the round trip.
+
+**`place.py` keeps houses as `(N, 4)` int arrays, not dicts.** The library holds every
+house at once; a dict of 24,000 cell tuples is a couple of megabytes and a hundred and
+sixty of them is a third of a gigabyte. The dict `build_mesh` wants is built per
+(house, transform) and dropped again.
 
 ## Conventions that cut across files
 
@@ -406,7 +462,7 @@ Deleting `cache/` is always safe.
 
 `footprints.FOOTPRINT_VERSION` is the fourth, and it is on its own branch like the map's:
 it keys the pickled mask survey, and its cache key also folds in every constant that
-changes what a mask *is* (`CELL`, `SUPERSAMPLE`, the area and cell caps, `FRAME_TOL`,
+changes what a mask *is* (`CELL`, `SUPERSAMPLE`, the area and span caps, `FRAME_TOL`,
 `NORM_LONG`) — so retuning those invalidates it without a version bump, while changing
 the grouping thresholds deliberately does *not*, because re-grouping a cached survey is
 the fast half. Bump `FOOTPRINT_VERSION` when the survey's *format* changes.
@@ -567,10 +623,11 @@ material or program that draws into the scene buffer must not tone map.**
 one in shadow within a factor of 1.6 of each other on screen when the light on them
 differed by seven: the whole city read as an overcast day whatever the sun was doing.
 
-**`sun_palette` is warm at both ends.** A physical palette goes neutral by 30 degrees, and
-the default sun is at 28, so the warm end has to reach much further up than physics puts
-it or the sun does nothing you can see. `ambient` scales sky and bounce together and is
-the single number separating afternoon from overcast.
+**`sun_palette` is daylight at the top and golden hour at the bottom.** The default sun is
+high (215, 52) and the picture is daylight; winding the elevation down with `,` warms it
+towards a sunset, which is what the low end is for. The blend runs out at 50 rather than
+the ~25 physics would put it, so the warm end is reachable at all. `ambient` scales sky
+and bounce together and is the single number separating daylight from overcast.
 
 **Ambient occlusion is contact darkening, not a dome.** `ao_radius` is 1.8 **metres** and
 that is small on purpose: at the 4.5 m that looked right on a street corner, one radius

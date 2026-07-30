@@ -57,7 +57,10 @@ HOUSE_DIR = 'models/houses'
 # house may stand where a specific building is, and a wall a metre out is a
 # wall a metre out.
 MATCH_IOU = 0.90
-MARGIN = F.ALIGN_MARGIN
+# Slack when fitting a plan over a building, in cells. Derived from metres, so
+# it means the same thing whatever `voxel.CELL_M` is set to — as a constant
+# number of cells it silently became four times stricter when the grid did.
+MARGIN = F.match_margin()
 
 # How far a house may be from the building's real height before it is better to
 # extrude. Without this every tower block gets a five-storey house on it.
@@ -97,9 +100,10 @@ class Plan:
 
     def __init__(self, cells, models, cell):
         self.mask, self.x0, self.z0 = cells_mask(cells)
+        self.margin = F.match_margin(cell)
         self.filled = int(np.count_nonzero(self.mask))
         self.cell = cell
-        self.houses = [{'voxels': v, 'height_m': _height(v) * cell,
+        self.houses = [{'cells': _packed(v), 'height_m': _height(v) * cell,
                         'name': n} for n, v in models]
         self.houses.sort(key=lambda h: h['height_m'])
         self._quads = {}
@@ -107,10 +111,13 @@ class Plan:
         # cells to map through, and placing it anyway would push geometry into
         # whatever is next door. Dropping it is right; doing so silently is not.
         self.strays = {h['name']: n for h in self.houses
-                       if (n := sum(1 for x, _, z in h['voxels']
-                                    if not (0 <= z - self.z0 < self.mask.shape[0]
-                                            and 0 <= x - self.x0
-                                            < self.mask.shape[1])))}
+                       if (n := int((~self._on_plan(h['cells'])).sum()))}
+
+    def _on_plan(self, arr):
+        """Which rows of a packed house sit over the plan's own cells."""
+        pz, px = arr[:, 2] - self.z0, arr[:, 0] - self.x0
+        h, w = self.mask.shape
+        return (pz >= 0) & (pz < h) & (px >= 0) & (px < w)
 
     def pick(self, target_m, seed):
         """A house near `target_m` tall, or None when none of them is close.
@@ -139,17 +146,33 @@ class Plan:
         key = (house, vi)
         got = self._quads.get(key)
         if got is None:
+            arr = self.houses[house]['cells']
+            arr = arr[self._on_plan(arr)]
             vmap = F.variant_cells(self.mask.shape, vi)
-            h, w = self.mask.shape
-            moved = {}
-            for (x, y, z), hue in self.houses[house]['voxels'].items():
-                pz, px = z - self.z0, x - self.x0
-                if 0 <= pz < h and 0 <= px < w:
-                    tz, tx = vmap[pz, px]
-                    moved[(int(tx), y, int(tz))] = hue
+            tz, tx = vmap[arr[:, 2] - self.z0, arr[:, 0] - self.x0].T
+            # the dict `build_mesh` wants is built here and dropped again: at a
+            # quarter-metre cell a house is tens of thousands of voxels, and one
+            # per model kept resident is the difference between a library that
+            # fits in a few tens of megabytes and one that does not
+            moved = {(int(a), int(b), int(c)): int(d)
+                     for a, b, c, d in zip(tx, arr[:, 1], tz, arr[:, 3],
+                                           strict=True)}
             got = voxel.build_mesh(moved)
             self._quads[key] = got
         return got
+
+
+def _packed(voxels):
+    """A voxel dict as an (N, 4) int32 array of (x, y, z, hue).
+
+    Houses are kept in this form rather than as dicts because the library holds
+    every one of them at once: a dict of 24,000 cell tuples is a couple of
+    megabytes, and a hundred and sixty of those is a third of a gigabyte.
+    """
+    if not voxels:
+        return np.zeros((0, 4), dtype=np.int32)
+    return np.array([(x, y, z, h) for (x, y, z), h in voxels.items()],
+                    dtype=np.int32)
 
 
 def _height(voxels):
@@ -163,6 +186,7 @@ class Library:
     def __init__(self, plans, cell):
         self.plans = plans
         self.cell = cell
+        self.margin = F.match_margin(cell)
         self.buckets = defaultdict(list)
         for i, p in enumerate(plans):
             self.buckets[tuple(sorted(p.mask.shape))].append(i)
@@ -174,15 +198,16 @@ class Library:
     def candidates(self, mask):
         """Plans that could still reach MATCH_IOU — both prunes are sound.
 
-        A bounding box more than MARGIN out cannot be fitted at all, and since
+        A bounding box more than `self.margin` out cannot be fitted at all, and
         the overlap of two masks never exceeds the smaller filled count over the
         larger, neither can a plan outside that band.
         """
         h, w = mask.shape
         n = int(np.count_nonzero(mask))
         near = set()
-        for dh in range(-MARGIN, MARGIN + 1):
-            for dw in range(-MARGIN, MARGIN + 1):
+        m = self.margin
+        for dh in range(-m, m + 1):
+            for dw in range(-m, m + 1):
                 near.update(self.buckets.get(tuple(sorted((h + dh, w + dw))), ()))
         return [i for i in near
                 if min(n, self.plans[i].filled)
@@ -193,7 +218,8 @@ class Library:
         best_score, best = MATCH_IOU, None
         for i in self.candidates(mask):
             plan = self.plans[i]
-            score, vi, off = F.align(plan.mask, mask, MARGIN, floor=best_score)
+            score, vi, off = F.align(plan.mask, mask, self.margin,
+                                     floor=best_score)
             if vi is not None and score > best_score:
                 best_score, best = score, (plan, vi, off, score)
         return best
@@ -220,11 +246,11 @@ class Library:
 
         # A mask cell (z, x) covers box coordinates ((x + col0) * cell,
         # (z + row0) * cell), and `off` says where the transformed plan sits in
-        # the building's mask (padded by MARGIN). Fold both into one translation
+        # the building's mask (padded by the margin). Fold both into one translation
         # in cells, so the mesh itself only ever needs the rotation.
         lo, u, v, (row0, col0) = frame
-        cx = off[1] - MARGIN + col0
-        cz = off[0] - MARGIN + row0
+        cx = off[1] - self.margin + col0
+        cz = off[0] - self.margin + row0
         a = cx * self.cell + lo[0]
         c = cz * self.cell + lo[1]
         basis = np.array([[u[0], 0.0, v[0]],

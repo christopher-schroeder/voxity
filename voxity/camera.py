@@ -153,7 +153,9 @@ class OrbitCamera:
         self.distance = distance
         self.fov = fov
         self.near = 0.1
-        self.far = 500.0
+        # A model is measured in cells, and at a quarter-metre cell a house is
+        # two hundred of them across; 500 put the far plane inside the model.
+        self.far = 3000.0
 
     @property
     def pos(self):
@@ -183,4 +185,4 @@ class OrbitCamera:
         self.target = self.target - right * dx * f + up * dy * f
 
     def zoom(self, notches):
-        self.distance = max(2.0, min(120.0, self.distance * (0.9 ** notches)))
+        self.distance = max(1.0, min(900.0, self.distance * (0.9 ** notches)))

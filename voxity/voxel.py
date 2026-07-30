@@ -33,6 +33,21 @@ from .mesh import MAT_VOXEL, MeshBuilder
 MODEL_DIR = 'models'
 DEFAULT_MODEL = os.path.join(MODEL_DIR, 'model.json')
 
+# --- how big a voxel is ----------------------------------------------------
+#
+# The edge of one cell in metres, and the one place it is decided. A model is
+# stored in cells and knows nothing about metres; this is what the survey
+# rasterises at, what a house is proportioned to, what `place.py` meshes at, and
+# what `Renderer.voxel_cell` must be set to. They all have to agree — the
+# shader's mosaic is a hash of the *world* cell, so a model meshed at one size
+# in a scene set to another stops lining up with its own geometry.
+#
+# 0.25 m is chosen from the look: it puts a window at about four cells across
+# and a storey at twelve, which is the density the voxel city builders have.
+# Changing it invalidates the footprint survey (its cache key folds this in),
+# every model on disk, and every cached city mesh.
+CELL_M = 0.25
+
 # --- palette ---------------------------------------------------------------
 
 PALETTE_SAT = 0.5          # fixed medium saturation (0..1)
@@ -260,6 +275,63 @@ def block_cells(mn, size):
                     yield (mn[0] + i, y, mn[2] + k)
 
 
+def boxes(voxels):
+    """Cover `voxels` with same-hue axis-aligned boxes, each cell used once.
+
+    Greedy: take the lowest unclaimed cell, grow it along x while the hue holds,
+    then along z, then along y. Architecture is mostly slabs and walls, so this
+    turns tens of thousands of cells into a few hundred boxes — at a quarter of
+    a metre a plain three-storey house is 13,000 voxels, and written out one per
+    line that is 180 kB of JSON for something nobody will ever read.
+
+    Only y >= 0 is merged. `block_cells` refuses negative y (it is what stops
+    the editor's brush digging below the floor), so a box spanning it would not
+    survive the round trip; those cells stay one per entry.
+    """
+    todo = {c: h for c, h in voxels.items() if c[1] >= 0}
+    out = []
+    for cell in sorted(todo):
+        if cell not in todo:
+            continue
+        hue = todo[cell]
+        x, y, z = cell
+        sx = 1
+        while todo.get((x + sx, y, z)) == hue:
+            sx += 1
+        sz = 1
+        while all(todo.get((x + i, y, z + sz)) == hue for i in range(sx)):
+            sz += 1
+        sy = 1
+        while all(todo.get((x + i, y + sy, z + k)) == hue
+                  for i in range(sx) for k in range(sz)):
+            sy += 1
+        for i in range(sx):
+            for j in range(sy):
+                for k in range(sz):
+                    del todo[(x + i, y + j, z + k)]
+        out.append((x, y, z, sx, sy, sz, hue))
+    return out
+
+
+def _entries(voxels):
+    """Voxels as JSON rows, boxed where that is smaller.
+
+    The 5-element `[x, y, z, size, hue]` row is the format `load` has always
+    understood for a sized voxel, and `block_cells` already takes a triple, so
+    this is a smaller file rather than a new format — an older reader is not
+    something that exists, but the loader needed no change at all.
+    """
+    rows = [[int(x), int(y), int(z), int(h)]
+            for (x, y, z), h in voxels.items() if y < 0]
+    for x, y, z, sx, sy, sz, hue in boxes(voxels):
+        if sx == sy == sz == 1:
+            rows.append([int(x), int(y), int(z), int(hue)])
+        else:
+            rows.append([int(x), int(y), int(z),
+                         [int(sx), int(sy), int(sz)], int(hue)])
+    return rows
+
+
 def save(voxels, path, footprint=None):
     """Write a model. `footprint` is the (x, z) ground it was built on, if any.
 
@@ -269,8 +341,8 @@ def save(voxels, path, footprint=None):
     """
     data = {
         'sat': PALETTE_SAT, 'n_hues': N_HUES, 'n_vals': N_VALS,
-        'voxels': [[int(x), int(y), int(z), int(hue)]
-                   for (x, y, z), hue in voxels.items()],
+        'cell': CELL_M,
+        'voxels': _entries(voxels),
     }
     if footprint:
         data['footprint'] = [[int(x), int(z)] for x, z in sorted(footprint)]

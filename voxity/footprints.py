@@ -46,26 +46,36 @@ from . import tags as T
 from . import voxel
 from .geo import Projection, dedup_ring, oriented_box
 
-FOOTPRINT_VERSION = 3
+FOOTPRINT_VERSION = 4
 
 # Only objects that could be a building; much narrower than extract.KEYS.
 KEYS = ('building',)
 
-# Cell size in metres. 1.0 matches `Renderer.voxel_cell`, so a model built on
-# one of these footprints drops into a city without re-meshing.
-CELL = 1.0
+# Cell size in metres, from the one place that decides it.
+CELL = voxel.CELL_M
 
-# Sub-samples per cell per axis when rasterising. A cell is filled when the
-# footprint covers at least half of it, so 2 means 2 of the 4 sub-cells.
-SUPERSAMPLE = 2
+# Sub-samples per cell per axis when rasterising: a cell is filled when the
+# footprint covers at least half of it. At a metre a cell was coarse enough
+# that half-coverage needed sampling to estimate; at a quarter of one the cell
+# is already smaller than any feature of a building outline, so one sample at
+# the centre says the same thing for a sixteenth of the work — and this pass
+# runs over every building in the extract.
+SUPERSAMPLE = 1 if CELL <= 0.4 else 2
 
 # What is worth treating as a repeatable shape at all. The area bounds drop
-# sheds and shopping centres; the cell and edge caps keep the rasteriser's
-# working set small and would not admit a "basic shape" anyway.
+# sheds and shopping centres; the span and edge caps keep the rasteriser's
+# working set small and would not admit a "basic shape" anyway. The span is in
+# **metres** so it means the same thing at any cell size — as cells it silently
+# became a 16 m cap when the grid got four times finer.
 MIN_AREA_M2 = 20.0
 MAX_AREA_M2 = 4000.0
-MAX_CELLS = 64
+MAX_SPAN_M = 64.0
 MAX_EDGES = 64
+
+
+def max_cells(cell=CELL):
+    """The span cap as a number of cells."""
+    return max(4, round(MAX_SPAN_M / cell))
 
 # Slack given to `geo.oriented_box` when it picks the frame to rotate into.
 # Without it an octagon's frame flips between its axis-aligned and its 45-degree
@@ -82,9 +92,36 @@ FRAME_TOL = 0.02
 NORM_LONG = 20
 
 # Overlap (intersection over union) at which two normalised shapes are the same
-# family, and cells of slack allowed when fitting one over the other.
+# family, and cells of slack allowed when fitting one over the other. This
+# margin is in cells of a *normalised* mask, which is NORM_LONG across whatever
+# the footprint really measured, so it does not scale with CELL.
 IOU_JOIN = 0.88
 ALIGN_MARGIN = 1
+
+# Slack for fitting two *real* masks over each other, in metres — used when a
+# family votes on a consensus plan, and by place.py when it matches a building.
+# Metres and not cells: a cell of slack was a metre when a cell was a metre, and
+# turning the grid up four times would otherwise quietly make the whole pipeline
+# four times fussier about what counts as the same building.
+MATCH_MARGIN_M = 0.75
+
+# Real sizes are counted in bins this wide rather than per exact cell dimension.
+# At a metre a cell was its own bin and that was fine; at a quarter of one, two
+# buildings 30 cm apart in width land in different bins, each family's modal
+# size collects a fraction of the members it should, and `consensus` ends up
+# voting on one building.
+SIZE_BIN_M = 0.5
+
+
+def match_margin(cell=CELL):
+    """`MATCH_MARGIN_M` as a number of cells, at least one."""
+    return max(1, round(MATCH_MARGIN_M / cell))
+
+
+def size_bin(dims_cells, cell=CELL):
+    """(cols, rows) in cells snapped to SIZE_BIN_M, as a hashable key in cells."""
+    step = max(1, round(SIZE_BIN_M / cell))
+    return tuple(round(d / step) * step for d in dims_cells)
 
 # Shapes put through family grouping. Grouping is quadratic in candidates, and a
 # city's tail is overwhelmingly shapes seen exactly once, which can neither form
@@ -186,7 +223,8 @@ def footprint_mask(outer, holes, cell=CELL):
         return None
     nx = max(1, round(span[0] / cell))
     nz = max(1, round(span[1] / cell))
-    if nx > MAX_CELLS or nz > MAX_CELLS:
+    cap = max_cells(cell)
+    if nx > cap or nz > cap:
         return None
 
     rings = [np.stack([ring @ u - lo[0], ring @ v - lo[1]], axis=1)]
@@ -408,11 +446,12 @@ class Family:
     only a concrete size can be written out as a model.
     """
 
-    def __init__(self, leader):
+    def __init__(self, leader, cell=CELL):
         self.leader = leader              # normalised mask
+        self.cell = cell
         self.members = 0                  # buildings
         self.shapes = 0                   # distinct normalised shapes folded in
-        self.sizes = Counter()            # (cols, rows) in cells -> buildings
+        self.sizes = Counter()            # binned (cols, rows) in cells -> buildings
         self.exact = defaultdict(int)     # exact mask key -> buildings
         self.area_sum = 0.0
 
@@ -427,7 +466,7 @@ class Family:
         for key, n in exact_keys.items():
             h, w = key[0], key[1]
             self.members += n
-            self.sizes[(w, h)] += n
+            self.sizes[size_bin((w, h), self.cell)] += n
             self.exact[key] += n
             self.area_sum += areas.get(key, 0.0)
 
@@ -436,21 +475,27 @@ class Family:
         return self.area_sum / max(self.members, 1)
 
     def modal_size(self):
-        """The cell dimensions most of the family's buildings really had."""
+        """The size bin most of the family's buildings really fell in."""
         return self.sizes.most_common(1)[0][0] if self.sizes else None
 
-    def consensus(self, size=None, margin=ALIGN_MARGIN):
-        """The cells a majority of the members at `size` agree on.
+    def consensus(self, size=None, margin=None):
+        """The cells a majority of the members in `size`'s bin agree on.
 
         Voting over the real masks of one size, not over the normalised shape:
         the normalised leader has the family's silhouette but none of its
         metres, and it is metres that have to line up with a voxel grid.
+
+        `size` is a *bin*, so the members voting here are near-identical rather
+        than bit-identical in their dimensions — which is the only way there are
+        several of them at all once a cell is smaller than the variation between
+        two buildings of the same design.
         """
+        margin = match_margin(self.cell) if margin is None else margin
         size = size or self.modal_size()
         if size is None:
             return None, 0
         want = [(k, n) for k, n in self.exact.items()
-                if (k[1], k[0]) == size]
+                if size_bin((k[1], k[0]), self.cell) == size]
         if not want:
             return None, 0
         want.sort(key=lambda kn: -kn[1])
@@ -471,7 +516,7 @@ class Family:
 
 
 def families(counts, areas, iou_join=IOU_JOIN, min_count=MIN_SHAPE_COUNT,
-             max_candidates=MAX_CANDIDATES, verbose=True):
+             max_candidates=MAX_CANDIDATES, cell=CELL, verbose=True):
     """Group normalised shapes into families, commonest candidate leading.
 
     `counts` is keyed on (normalised key, exact key), which is what lets a family
@@ -527,7 +572,7 @@ def families(counts, areas, iou_join=IOU_JOIN, min_count=MIN_SHAPE_COUNT,
         if best[0] >= iou_join:
             out[best[1]].add(exact_keys, areas)
         else:
-            fam = Family(mask)
+            fam = Family(mask, cell)
             fam.add(exact_keys, areas)
             out.append(fam)
             canvases.append((mask_pad(mask, ALIGN_MARGIN), n_mask))
@@ -549,7 +594,7 @@ def _cache_key(path, cell):
     st = os.stat(path)
     raw = (f'{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}|'
            f'{cell:.4f}|{SUPERSAMPLE}|{MIN_AREA_M2}|{MAX_AREA_M2}|'
-           f'{MAX_CELLS}|{MAX_EDGES}|{FRAME_TOL}|{NORM_LONG}|'
+           f'{MAX_SPAN_M}|{MAX_EDGES}|{FRAME_TOL}|{NORM_LONG}|'
            f'{FOOTPRINT_VERSION}')
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
@@ -695,12 +740,16 @@ def list_models(out_dir=OUT_DIR):
     return out
 
 
-def write_sheet(models, path, cell, cols=6, scale=6, pad=12):
+def write_sheet(models, path, cell, cols=6, scale=None, pad=12):
     """Contact sheet of what was written — the only way to eyeball these."""
     import pygame
     pygame.font.init()
     font = pygame.font.SysFont('dejavusansmono,consolas,monospace', 12)
     label_h = 32
+    big = max(max(m['mask'].shape) for m in models)
+    # pixels per cell, chosen so the largest plan fills a tile rather than fixed:
+    # at a quarter-metre cell a fixed 6 would make one plan 300 px wide
+    scale = scale or max(1, 150 // max(big, 1))
     tw = max(m['mask'].shape[1] for m in models) * scale
     th = max(m['mask'].shape[0] for m in models) * scale
     cell_w, cell_h = max(tw, 130) + 2 * pad, th + 2 * pad + label_h
@@ -758,7 +807,10 @@ def write(fams, out_dir, cell, meta, count=16, per_family=2, total=None,
                 continue
             h, w = mask.shape
             filled = int(np.count_nonzero(mask))
-            name = f'footprint-{len(entries):02d}-{len(sizes)}-{w}x{h}.json'
+            # metres in the name, not cells: cells stop meaning anything to a
+            # reader the moment CELL is not 1, and the file is for reading by eye
+            name = (f'footprint-{len(entries):02d}-{len(sizes)}-'
+                    f'{round(w * cell)}x{round(h * cell)}m.json')
             voxel.save(footprint_voxels(mask), os.path.join(out_dir, name))
             rec = {'variant': len(sizes), 'file': name, 'buildings': n,
                    'agreeing': weight, 'cells': [w, h],

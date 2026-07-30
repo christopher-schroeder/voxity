@@ -13,7 +13,7 @@ import math
 import moderngl
 import numpy as np
 
-from . import shaders
+from . import shaders, voxel
 from .build import tree_mesh
 from .camera import look_at, ortho, to_gl
 
@@ -53,35 +53,35 @@ def sun_direction(azimuth_deg, elevation_deg):
 def sun_palette(elevation_deg):
     """Sun / sky / haze / bounce colours for a given sun height.
 
-    **Both ends of this are warm**, which is the single decision the look rests
-    on. A physical palette goes neutral by 30 degrees, and at the default sun of
-    30 that left a cream wall reading white — the sun was doing nothing you
-    could see. The blend now runs out at 55 and the top end is still golden, so
-    the picture is late afternoon at any hour the sun is actually up.
+    The top end is **daylight** — a near-white sun and a blue sky — and the
+    bottom end is the golden hour. The default sun is high, so the picture is
+    daylight; winding it down with `,` still gets you a sunset, which is what
+    the low end is for. The blend runs out at 50 rather than at the ~25 physics
+    would put it, so the warm end reaches far enough down to be reachable.
 
     Three of the four are *ambient*: `sky` lights an upward-facing surface,
     `bounce` lights a downward-facing one, and the mix between them by normal is
     what stops a shadowed wall reading as flat grey.
     """
-    t = float(np.clip(elevation_deg / 55.0, 0.0, 1.0))
+    t = float(np.clip(elevation_deg / 50.0, 0.0, 1.0))
 
     def blend(low, high):
         return np.array(low) * (1 - t) + np.array(high) * t
 
-    sun = blend([2.05, 1.18, 0.52], [1.66, 1.40, 1.02])
-    sky = blend([0.30, 0.30, 0.36], [0.31, 0.37, 0.50])
-    haze = blend([1.02, 0.68, 0.40], [0.86, 0.84, 0.84])
-    # warm, because what bounces up into an eave is the ground and the brick
-    # opposite, not the sky
-    bounce = blend([0.24, 0.155, 0.10], [0.19, 0.17, 0.15])
+    sun = blend([2.05, 1.18, 0.52], [1.62, 1.58, 1.46])
+    sky = blend([0.30, 0.30, 0.36], [0.40, 0.50, 0.70])
+    haze = blend([1.02, 0.68, 0.40], [0.80, 0.87, 0.98])
+    # A little warm even at noon: what bounces up into an eave is the ground and
+    # the brick opposite, not the sky.
+    bounce = blend([0.24, 0.155, 0.10], [0.24, 0.23, 0.21])
     night = float(np.clip((elevation_deg + 6.0) / 8.0, 0.15, 1.0))
     return (sun * night, sky * (0.35 + 0.65 * night),
             haze * (0.25 + 0.75 * night), bounce * (0.3 + 0.7 * night))
 
 
 class Renderer:
-    def __init__(self, ctx, verts, trees, extent, sun_azimuth=240.0,
-                 sun_elevation=28.0):
+    def __init__(self, ctx, verts, trees, extent, sun_azimuth=215.0,
+                 sun_elevation=52.0):
         self.ctx = ctx
         self.extent = extent
         self.sun_azimuth = sun_azimuth
@@ -98,16 +98,16 @@ class Renderer:
         # whole tree canopy and the tree goes uniformly black.
         self.ao_radius = 1.8
         self.ao_power = 1.3           # deepens the dark end, leaves the open end
-        self.ao_tint = (0.40, 0.32, 0.27)     # what an occluded fragment fades to
+        self.ao_tint = (0.42, 0.42, 0.44)     # what an occluded fragment fades to
         # Ambient scales both halves of the sky/bounce pair, and it is the one
         # number that decides afternoon versus overcast: at 1.0 a wall in shadow
         # came out within a factor of two of one in the sun.
         self.ambient = 1.05
-        self.saturation = 1.16
+        self.saturation = 1.10
         self.contrast = 1.05
-        self.shadow_tint = (0.94, 0.96, 1.06)
-        self.light_tint = (1.09, 1.00, 0.88)
-        self.vignette = 0.30
+        self.shadow_tint = (0.95, 0.98, 1.06)
+        self.light_tint = (1.03, 1.01, 0.97)
+        self.vignette = 0.24
         # Not 1.0: a cast shadow that rejects every scrap of sun goes to
         # whatever ambient alone gives it, and on ground this dark that is
         # black with nothing in it.
@@ -122,10 +122,10 @@ class Renderer:
         self.time = 0.0
         # Edge length of one voxel, for anything in the buffer carrying
         # MAT_VOXEL. One uniform for the whole scene, so every voxel model in a
-        # city has to be meshed at the same cell size — pass the same value to
-        # `voxel.mesh_vertices(scale=...)` that you set here or the mosaic
-        # stops lining up with the geometry.
-        self.voxel_cell = 1.0
+        # city has to be meshed at the same cell size — which is why it comes
+        # from voxel.CELL_M rather than being a number here. Set it to anything
+        # else and the mosaic stops lining up with the geometry.
+        self.voxel_cell = voxel.CELL_M
 
         self.scene_prog = ctx.program(vertex_shader=shaders.SCENE_VS,
                                       fragment_shader=shaders.SCENE_FS)

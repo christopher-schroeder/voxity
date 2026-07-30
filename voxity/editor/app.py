@@ -246,7 +246,7 @@ class Editor:
         if b is not None:
             lo, hi = b
             span = max(hi[i] - lo[i] for i in range(3))
-            self.cam.distance = float(np.clip(span * 2.0, 6.0, 120.0))
+            self.cam.distance = float(np.clip(span * 2.0, 4.0, 900.0))
 
     def draw_3d(self, size, over_ui):
         if self.dirty:

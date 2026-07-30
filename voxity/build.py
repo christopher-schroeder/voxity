@@ -249,8 +249,12 @@ def _add_building(mb, b):
 # in the frame that did not read as built out of cubes, and the flat facets they
 # gave the light made a street of them look like plastic. These are cell counts
 # across and up; every cell costs geometry that is then instanced over every
-# tree in the square, so they stay small.
-CANOPY_WIDE, CANOPY_TALL = 9, 12
+# tree in the square, so they stay small. 12 across puts a canopy block at about
+# 0.85 m, which is coarser than the 0.25 m the buildings are built from and
+# stays that way: the canopy is instanced *scaled* geometry rather than
+# world-aligned voxels, so matching the world cell would need forty cells across
+# and eight thousand triangles per tree.
+CANOPY_WIDE, CANOPY_TALL = 12, 16
 
 
 def _blob(nx, ny, ragged, rng):
