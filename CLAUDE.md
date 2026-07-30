@@ -7,7 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A single-binary-ish Python app with **two tools sharing one window and one GL context**:
 a city that reads a square out of an `.osm.pbf` extract, turns OSM features into
 triangles and flies a camera through them; and a **voxel editor** for the models the
-city is made of. Launched bare it shows a start screen and you pick one. The city path
+city is made of. The two meet: a building whose footprint matches one of the surveyed
+floor plans is drawn as a voxel model rather than extruded (see place.py), so editing a
+house changes what the city looks like. Launched bare it shows a start screen and you pick one. The city path
 then shows a flat 2D map of the whole extract to pick the square to play on. No test
 suite — just `main.py` and the `voxity/` package, Poetry for dependencies, and git
 (`origin` is `github.com:christopher-schroeder/voxity`).
@@ -42,11 +44,13 @@ the project installed **editable** into that same environment:
 ./env/bin/voxity --editor                       # straight into the voxel editor
 ./env/bin/voxity --list-places                  # 14 Hamburg presets in main.py
 ./env/bin/voxity --build-footprints             # survey footprint shapes, then exit
+./env/bin/voxity --build-houses                 # a default house per footprint, then exit
 ```
 
-`--build-map` and `--build-footprints` are checked before anything else in `main.main`
-and both `return` rather than falling through, so neither opens a window; they are the
-two offline tools.
+`--build-map`, `--build-footprints` and `--build-houses` are checked before anything else
+in `main.main` and all three `return` rather than falling through, so none opens a window;
+they are the offline tools. They run in that order as a chain — the survey reads the
+extract, the houses read the survey, the city reads the houses.
 
 **Naming a tool suppresses everything before it.** `--place`/`--center`/`--bbox`,
 `--no-map` and `--screenshot` (which has nobody to click) go straight to the direct city
@@ -146,6 +150,16 @@ square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 # 9. a footprint opened as a model, which is the point of (8)
 ./env/bin/voxity --editor --model models/footprints/footprint-00-0-12x9.json \
     --screenshot fp.png
+
+# 10. the default houses — no GL, ~1s, rewrites models/houses/ in place
+./env/bin/voxity --build-houses
+
+# 11. the matcher, in the pipeline check of (1): the "placed N of M" line is it
+#     (rathaus is the worst case at ~6%; eppendorf or wandsbek show more)
+./env/bin/voxity --place wandsbek --size 800 --screenshot city.png
+
+# 12. the same square with every building extruded, for an A/B
+./env/bin/voxity --place wandsbek --size 800 --no-voxel-houses --screenshot flat.png
 ```
 
 (1) works because `main.run_windowed` and `main.render_headless` import moderngl and
@@ -166,7 +180,21 @@ lon/lat → bbox chain comes out the right size and in the right hemisphere.
 (6) is the cheap voxel check but it draws no UI, so ui.py is untested by it. To see the
 editor's chrome or the start screen without a human, wrap `pygame.display.flip` to read
 `ctx.screen` *before* it swaps (afterwards the back buffer is undefined) and call
-`startscreen.choose` / `editor.run` with `frames=`.
+`startscreen.choose` / `editor.run` with `frames=`. **With no X server at all** there is a
+second way that needs no window: draw into a standalone-EGL framebuffer instead of
+`ctx.screen` and call `Editor.draw_3d` / `Editor.draw_ui` directly. It needs
+`SDL_VIDEODRIVER=dummy` plus a 16x16 `set_mode` first — not for GL, which comes from EGL,
+but because `ui._texture` calls `convert_alpha()` and that wants *a* pygame display
+surface.
+
+The invariant to test on the placement side is that a house lands **inside the building's
+own outline**, at every rotation. Build a ring from a plan's cells, turn it through a
+dozen angles, place it, and check every returned vertex is inside that polygon (allow one
+cell of slack — the mask is a rasterisation, so a cell may overhang by half of one). That
+is the check that catches a mirrored placement, which is the failure mode that looks
+plausible: an L placed mirrored is still an L in the right spot, just with its wing on
+the wrong side. Do it with an L or a U, never a rectangle — a rectangle is symmetric
+under the very transform you are trying to catch.
 
 The invariant worth testing on the voxel side is that the shader's mosaic agrees with
 `voxel.value_for_cell` on the CPU. Mesh a flat single-hue wall — it greedy-merges to one
@@ -187,15 +215,27 @@ play:   .osm.pbf → extract.py → Scene → build.py ─┐
 map:    .osm.pbf → overview.py ────────────────── │ → PNG → mapview.py → GL
 voxel:  models/*.json → voxel.py ─────────────────┴→ (verts, trees) → renderer.py → GL
                                  └→ editor/render.py → GL   (the editor's own view)
-shapes: .osm.pbf → footprints.py → models/footprints/*.json ─┘  (via the editor,
-                                                                 by hand)
+shapes: .osm.pbf → footprints.py → models/footprints/*.json
+                → houses.py     → models/houses/*.json  ──→ place.py ──┘
+                    (or the editor, by hand)
 ```
 
-The shapes pipeline is the only one with a **human in the middle**, and it is offline:
-`--build-footprints` reduces every building in the extract to a mask on the voxel grid
-and writes the commonest ones out as one-layer voxel models, which you then open in the
-editor and build upwards into a house. Nothing at runtime reads `models/footprints/`
-yet — placing those models back into a city is not written.
+The shapes pipeline is the only one with a **human in the middle**, and its first two
+stages are offline. `--build-footprints` reduces every building in the extract to a mask
+on the voxel grid and writes the commonest ones as one-layer voxel models;
+`--build-houses` stands a few default houses on each of those; you replace those by hand
+in the editor. `place.py` closes the loop at play time: it re-derives each real
+building's mask, matches it against the plans, and drops one of that plan's houses on it
+instead of extruding it. A building that matches nothing is extruded exactly as before,
+so the city degrades to what it was rather than to holes in the ground.
+
+**Coverage is bounded by how many footprints exist, not by the matcher.** A plan matches
+a building only at its own size (±`ALIGN_MARGIN`), so the number of *concrete sizes* the
+survey wrote is the ceiling. At the defaults (16 families × 2 sizes = 32 plans) about 10%
+of buildings get a house; `--footprint-sizes 8` (120 plans) takes it to ~23%. Raising
+`--footprint-count` instead barely helps — see "Retuning the footprint survey" for why
+the two axes are not interchangeable. Lowering `place.MATCH_IOU` is the wrong knob: it
+buys coverage by putting houses on buildings whose walls are somewhere else.
 
 The voxel pipeline exists twice on purpose. `voxel.mesh_vertices` emits the **shared
 layout from mesh.py**, so a model can go into a city's buffer and be lit by its sun and
@@ -249,6 +289,15 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   its own walls, rasterises it to the voxel grid, and groups the results. **No GL, no
   pygame at import** — pygame is imported inside `write_sheet` only, which is why
   main.py can import it at the top without breaking the GL-free smoke test.
+- **voxity/houses.py** — the default house generator. Walls are the footprint's
+  perimeter and roofs are repeated **erosion** of the plan, which is what makes them work
+  on an L or an octagon and not just a box; models are hollow, since the interior is a
+  sealed cavity `voxel.exterior_air` drops anyway. No GL, no pygame, and no OSM — it only
+  reads and writes models.
+- **voxity/place.py** — the runtime match. Reuses `footprints.footprint_mask` for the
+  building and `footprints.align` for the fit, so there is exactly one rasteriser. Meshes
+  each house once per dihedral transform and reuses it across every building of that
+  shape, which is what makes it cheap (~0.4 s for a 270-building square).
 - **voxity/voxel.py** — the model (`{(x,y,z): hue}`), the palette, the per-cell value
   hash, exterior-cavity culling, the greedy mesher and JSON load/save. **No GL, no
   pygame** — that is what lets the city import it. `mesh_vertices(quads, scale, offset)`
@@ -300,7 +349,27 @@ mesh.py, consumed by `Renderer.scene_vao`, read by `SCENE_VS`. `MAT_MATTE` 0,
 to matte, and a new one has to keep its distance from the others by more than 0.5.
 `u_voxel_cell` is one uniform for the whole scene, so every voxel model in a city has to
 be meshed at the same `scale` that `Renderer.voxel_cell` is set to, or the mosaic stops
-lining up with the geometry. Trees are a separate program and buffer entirely
+lining up with the geometry.
+
+**The mosaic does not follow a rotated model, and that is a deliberate trade.**
+`voxel_value` hashes the **world** cell, so a house `place.py` stands on a building that
+does not run north-south gets a lattice at an angle to its own voxels. It still reads as
+voxel noise — it is the same hash at the same scale — but it is not the noise the editor
+drew for that model. Fixing it means handing the shader a per-building frame, and the
+vertex layout has no room for one. The obvious alternative, baking the value into the
+vertex colour, is what costs: neighbouring cells hash differently, so `_greedy_plane`
+would merge almost nothing and a house goes from a few hundred triangles to a few
+thousand — a 1000x difference in the buffer over a square. If you ever do add a frame,
+`voxel.mesh_vertices(basis=...)` already has the rotation.
+
+`basis` must be a **rotation**, never a reflection: normals go through it unchanged and a
+reflection turns every face inside out under back-face culling. `place.py` mirrors a
+model by mirroring its *voxels* and re-meshing, which is free — it happens at most eight
+times per house however many buildings ask for it. Note that greedy meshing is **not**
+rotation-invariant (it scans row-major), so the same house turned 90 degrees is congruent
+but has a different vertex count; compare surface area, not vertices.
+
+Trees are a separate program and buffer entirely
 (`tree_mesh` + per-instance `x, z, height, radius, tint`), so the material slot never
 sees foliage. Changing the layout means touching all three places,
 plus the `'3f 28x'` stride in `scene_depth_vao`.
@@ -329,6 +398,13 @@ the fast half. Bump `FOOTPRINT_VERSION` when the survey's *format* changes.
 Footprint output is not a cache: `models/footprints/` is checked-in-able work product
 and nothing deletes it, so a re-run overwrites `footprint-*.json` in place. Move a model
 you have started building **out** of that directory before re-running.
+
+**The mesh cache key also folds in the house directory**, via `place.signature` — a
+sha1 over the names, sizes and mtimes in `models/houses/`. The houses are *data*, so no
+version constant would ever notice you editing one, and a stale `.npz` would silently
+keep the old building. `--no-voxel-houses` gets its own key (`-flat`) rather than being
+applied afterwards, because unlike `--no-trees` an extrusion cannot be recovered from a
+cached mesh that has a house in it.
 
 `--no-trees` is applied *after* the mesh cache is read (`main.prepare` slices `trees` to
 length zero), so trees are always meshed and stored: changing tree geometry still needs a
@@ -396,8 +472,10 @@ invalidate `Renderer._shadow_key`.
    shows on the map), then verify with `--screenshot` and, if the map changed,
    `--build-map --map-size 512`.
 
-Voxel models are **not** cached — they are meshed on load and on every edit — so none of
-the four versions covers them and none needs bumping for a voxel change.
+Voxel models are **not** cached in the editor — they are meshed on load and on every edit
+— so none of the four versions covers them and none needs bumping for a voxel change. A
+model placed in a *city* is different: it is baked into the `.npz` like everything else,
+and `place.signature(models/houses/)` in the mesh key is what notices you edited it.
 
 ## Retuning the footprint survey
 
@@ -452,6 +530,37 @@ do not round to the same twentieths. And scale invariance holds at the *family* 
 only — a 9.6 m square on a 1 m grid genuinely loses a corner cell that a 12 m one keeps,
 so asserting equal canonical keys across scales will fail; assert that `families()` puts
 them together.
+
+## Houses, and putting them on buildings
+
+`houses.py` writes the defaults, `place.py` puts them down. Two constants decide *whether*
+a house is used at all, and they are separate on purpose:
+
+* **`place.MATCH_IOU` (0.90)** is deliberately higher than the survey's `IOU_JOIN` (0.88).
+  Joining two shapes into a family only has to decide they are the same *kind* of shape;
+  this decides a specific house may stand where a specific building is, and a wall a metre
+  out is a wall a metre out. Do not reuse one for the other.
+* **`HEIGHT_TOL_M` / `HEIGHT_TOL_REL`** are what keep a tower block a tower block. The
+  plans fit an office block's floor perfectly well, and without a height check every one
+  of them gets a five-storey house. `Plan.pick` returns None rather than the least-bad
+  house, and None means extrude.
+
+Which house a matched building gets is `place._pick`, a hash of the OSM id — **never
+`random`**, for the sharper reason than usual that the mesh is cached: a second run that
+picked differently would contradict the `.npz` the first one wrote.
+
+A house voxel that sits outside its own footprint has nowhere to go — `Plan.quads` maps
+through the plan's cells and nothing else — so it is dropped, and `place.load` says so on
+the console. Generated houses never do this (walls are the perimeter, roofs erode inwards);
+a hand-edited one can, if you clear the footprint in the editor and then build outside it.
+
+Two things in `houses.py` that look arbitrary and are not. The **roof rise is capped at
+`top // 3`**: left to run, erosion stops only when the plan is used up, which is half the
+short span — a real 45-degree pitch, but on a 12 m deep plan it buries the one storey
+underneath it. And every detail hue goes through **`contrast()`**, because saturation and
+value are fixed by the palette (`voxel.py` owns them) so hue is the only thing telling a
+window from the wall around it; blue glass on a blue wall is invisible, and four of the
+nine wall hues are blue.
 
 ## Style
 

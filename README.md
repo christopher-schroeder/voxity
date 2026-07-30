@@ -12,6 +12,10 @@ extrudes the buildings, lays out the roads and water, and renders the result
 with a shadow-mapped sun. **Voxel editor** opens a grid you build blocky models
 on, and `ESC` from either takes you back to the menu.
 
+The halves meet in the middle: the city surveys the floor plans it repeats, the
+editor builds houses on those plans, and buildings matching one are drawn as the
+voxel house instead of an extruded block.
+
 ```
 ./env/bin/voxity                                  # menu
 ./env/bin/voxity --place rathaus --size 1200      # straight into the city
@@ -46,6 +50,14 @@ is what gives a flat wall its mosaic.
 | `S` `L` | save / load the current model |
 | `B` | choose a footprint to build on |
 | `ESC` | back to the menu |
+
+Under the brush steppers is what the model currently costs: **triangles and
+vertices**, the model's **height** in cells, and its base dimensions and voxel
+count. Both counts are there because between them they show the greedy mesher
+working — a flat wall of one hue is two triangles however many voxels it is, so
+a voxel count that climbs while the triangle count does not is merging doing its
+job. The numbers are what the mesher just produced, not an estimate, so they
+update the moment you place or delete a block.
 
 The block moves in **single cells** at any size, rather than snapping to a grid
 of its own size: it centres on the cell under the cursor, and sits on the empty
@@ -129,6 +141,46 @@ anything you have started building out of there first.
 The first run reads all 355k buildings and takes about **4 to 5 minutes**. The
 survey is cached after that, so retuning how shapes are grouped re-runs in two
 seconds — which is the point of caching the masks rather than the result.
+
+## Houses in the city
+
+`--build-houses` stands a few default houses on every footprint the survey
+found, and the city then puts them back on the buildings they came from.
+
+```
+./env/bin/voxity --build-houses          # writes models/houses/
+./env/bin/voxity --place wandsbek --size 800
+```
+
+The defaults are meant to be replaced. Each footprint gets five: one to five
+storeys, cycling through a gabled, hipped and flat roof, with windows, a door
+and a plinth in hues picked to be visible against the walls. Walls follow the
+footprint's **perimeter**, so a courtyard gets walls round it too, and roofs are
+built by repeatedly **shrinking the plan and stacking it** — which is why an L
+keeps its inner corner instead of being given a rectangle's ridge. Every house
+records the plan it stands on, so opening one in the editor gives you the ground
+and the limits back. Filenames are only for reading by eye; the city reads the
+footprint out of each file, so you can rename them, edit them, or draw your own
+from scratch.
+
+When a square loads, every building's footprint is measured the same way the
+survey measured it and matched against the plans. A match gets one of that
+plan's houses — turned and mirrored to fit, and chosen by which one is closest
+to the building's real height, so a two-storey building does not get a
+five-storey house. Which of the near-enough ones it gets is a hash of the OSM
+id, so a given building always looks the same and the whole square stays
+cacheable. **A building that matches nothing is extruded exactly as before**, and
+so is anything no house is the right height for — that is what keeps a tower
+block a tower block.
+
+At the defaults about **one building in ten** gets a house, and it is the number
+of footprints that limits it: a plan only matches at its own size, so
+`--footprint-sizes 8` (120 plans instead of 32) takes it to roughly one in four,
+at the cost of five times as many models to look after. `--no-voxel-houses`
+extrudes everything, for an A/B.
+
+Houses are baked into the cached square mesh along with everything else, and the
+cache notices when you edit one — the key includes what is in `models/houses/`.
 
 ## The map
 
@@ -233,6 +285,10 @@ built-in `--place` presets are all Hamburg.
 --footprint-sizes N    real sizes of each shape to write (default 2)
 --footprint-iou F      overlap at which two shapes are one family (default 0.88)
 --footprint-dir DIR    where they go     (default models/footprints)
+--build-houses         write default houses for every footprint and exit
+--house-variants N     houses per footprint (default 5)
+--house-dir DIR        where they live   (default models/houses)
+--no-voxel-houses      extrude every building instead of placing houses
 ```
 
 Naming a tool on the command line — `--place`/`--center`/`--bbox`, `--no-map`
@@ -250,7 +306,8 @@ check that the voxel shader still compiles.
   guess per building type nudged by a hash of the id so blocks aren't flat.
   Walls and roofs are coloured from a north-German palette (brick, clinker,
   render, slate) unless the object carries `building:colour` / `roof:colour`.
-  Small rectangular houses get a pitched roof.
+  Small rectangular houses get a pitched roof. Buildings whose footprint is one
+  of the surveyed floor plans get a **voxel house** instead — see above.
 * **Roads** — mitred ribbons, width and shade by `highway` class, with a
   casing under the wider ones. Bridges are lifted by their `layer`, tunnels
   dropped.
@@ -284,6 +341,8 @@ voxity/renderer.py    moderngl passes: shadow map, scene, sky, trees
 voxity/overview.py    the whole extract baked into one flat 2D map (cached)
 voxity/mapview.py     picking the region to play on, off that map
 voxity/footprints.py  the extract's commonest footprints -> voxel floor plans
+voxity/houses.py      a floor plan -> default voxel houses standing on it
+voxity/place.py       a real building -> the house that matches it, placed
 
 voxels
 voxity/voxel.py       the model, the palette, the greedy mesher, JSON
@@ -304,8 +363,10 @@ opens in a couple of seconds afterwards. The overview map is cached there too,
 and costs about 70 s the first time; the footprint survey is cached there too and
 costs 4-5 minutes. `--no-cache` skips all four — which means re-baking the map
 and re-reading every building as well, so it is a slow flag. Deleting `cache/` is always safe; note that the
-footprint *models* are not in there, they are work product under
-`models/footprints/`.
+footprint and house *models* are not in there, they are work product under
+`models/footprints/` and `models/houses/`. Editing one of those does invalidate
+the cached square meshes built with it — the mesh key includes what is in the
+house directory — so a change shows up on the next run without a `--no-cache`.
 
 ## Setup
 

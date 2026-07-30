@@ -9,6 +9,7 @@ instanced through their own program in renderer.py.
 import numpy as np
 from mapbox_earcut import triangulate_float32
 
+from . import place
 from .geo import dedup_ring, oriented_box, signed_area
 from .mesh import MAT_MATTE, MAT_WATER, MeshBuilder, orient_triangles
 
@@ -288,9 +289,15 @@ def tree_instances(points, rng):
 
 # --- top level --------------------------------------------------------------
 
-def build_scene(scene, seed=7, verbose=True):
+def build_scene(scene, seed=7, verbose=True, voxel_houses=True):
     rng = np.random.default_rng(seed)
     mb = MeshBuilder()
+
+    # Buildings whose footprint is one of the surveyed plans get a voxel house
+    # instead of an extrusion. Decided up front so `_add_building` keeps meaning
+    # exactly what it always did — it is the fallback, not a special case.
+    lib = place.load() if voxel_houses else None
+    houses, scene_buildings = place.place_all(scene.buildings, lib, verbose)
 
     minx, minz, maxx, maxz = scene.extent
 
@@ -325,10 +332,14 @@ def build_scene(scene, seed=7, verbose=True):
         if ln['kind'] == 'rail':
             _add_ribbon(mb, ln['pts'], ln['width'] * 0.25, y + 0.03, rgb * 1.9)
 
-    for b in scene.buildings:
+    for b in scene_buildings:
         _add_building(mb, b)
 
+    # houses arrive already packed in the shared layout, so they only have to be
+    # concatenated; order does not matter, this is opaque depth-tested geometry
     verts = mb.pack()
+    if houses:
+        verts = np.vstack([verts, *houses]).astype(np.float32)
     trees = tree_instances(scene.trees, rng)
     if verbose:
         print(f'  meshed {len(verts) // 3} triangles, {len(trees)} trees')

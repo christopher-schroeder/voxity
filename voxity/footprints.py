@@ -141,22 +141,38 @@ def _rasterise(edges, nx, nz, cell, ss=SUPERSAMPLE):
     return sub.reshape(nz, ss, nx, ss).sum(axis=(1, 3)) * 2 >= ss * ss
 
 
-def _trim(mask):
-    """Crop to the occupied bounding box, or None when nothing is set."""
+def _trim_at(mask):
+    """Crop to the occupied bounding box: (mask, row0, col0), or (None, 0, 0).
+
+    The corner it cropped from is what lets a caller put the mask back where it
+    came from — `place.py` has to turn a mask cell into a world position, and
+    the crop is the one step between the two that is not a fixed formula.
+    """
     rows = np.flatnonzero(mask.any(axis=1))
     cols = np.flatnonzero(mask.any(axis=0))
     if not len(rows) or not len(cols):
-        return None
-    return mask[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+        return None, 0, 0
+    return (mask[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1],
+            int(rows[0]), int(cols[0]))
+
+
+def _trim(mask):
+    """Crop to the occupied bounding box, or None when nothing is set."""
+    return _trim_at(mask)[0]
 
 
 def footprint_mask(outer, holes, cell=CELL):
-    """One footprint as (mask, area_m2, span_m), or None if it is no candidate.
+    """One footprint as (mask, area_m2, span_m, frame), or None if it is no candidate.
 
     The ring is rotated onto its own walls first, so `mask` rows run along the
     oriented box's short axis and columns along its long one — the orientation a
     model would be built in, not any compass direction. `span` is that box in
     metres, unrounded, which is what `normalise` needs to be scale-free.
+
+    `frame` is `(lo, u, v, (row0, col0))`, everything needed to put the mask back
+    on the map: a mask cell (z, x) covers box coordinates starting at
+    `((x + col0) * cell, (z + row0) * cell)`, and a box coordinate (a, b) is the
+    world point `(a + lo[0]) * u + (b + lo[1]) * v`.
     """
     ring = dedup_ring(np.asarray(outer, dtype=np.float64))
     if len(ring) < 3 or len(ring) > MAX_EDGES:
@@ -181,13 +197,14 @@ def footprint_mask(outer, holes, cell=CELL):
             rings.append(np.stack([hr @ u - lo[0], hr @ v - lo[1]], axis=1))
             n_edges += len(hr)
 
-    mask = _trim(_rasterise(_edges(rings), nx, nz, cell))
+    mask, row0, col0 = _trim_at(_rasterise(_edges(rings), nx, nz, cell))
     if mask is None:
         return None
     area = float(np.count_nonzero(mask)) * cell * cell
     if area < MIN_AREA_M2 or area > MAX_AREA_M2:
         return None
-    return mask, area, (float(span[0]), float(span[1]))
+    return (mask, area, (float(span[0]), float(span[1])),
+            (lo, u, v, (row0, col0)))
 
 
 # --- normalising away size -------------------------------------------------
@@ -275,6 +292,23 @@ def key_mask(key):
     return bits.reshape(h, w).astype(bool)
 
 
+def variant_cells(shape, vi):
+    """Where each cell of a `shape`-sized mask lands in `variants(...)[vi]`.
+
+    An (h, w, 2) array of (row, col) destinations. Derived by pushing an index
+    array through the very same call `variants` makes rather than by working the
+    rotations out by hand, so the two cannot disagree — and getting one of them
+    backwards mirrors a house against the footprint it is standing on, which
+    reads as a subtly wrong building rather than as an obvious bug.
+    """
+    h, w = shape
+    dest = variants(np.arange(h * w).reshape(h, w))[vi]
+    rows, cols = np.divmod(np.arange(dest.size), dest.shape[1])
+    out = np.empty((h * w, 2), dtype=np.int64)
+    out[dest.ravel()] = np.stack([rows, cols], axis=1)
+    return out.reshape(h, w, 2)
+
+
 def canonical(mask):
     """The smallest of the 8 transforms, so turned and mirrored agree.
 
@@ -302,7 +336,11 @@ def mask_pad(mask, margin):
 
 def align(mask, leader, margin=ALIGN_MARGIN, floor=0.0, canvas=None,
           n_leader=None):
-    """Best (iou, variant, offset) fitting `mask` over `leader`.
+    """Best (iou, variant index, offset) fitting `mask` over `leader`.
+
+    The index is into `variants(mask)`, and `variant_cells` turns it into a cell
+    mapping — which is what lets geometry built on one mask be laid over the
+    other, not just scored against it.
 
     The leader goes on a canvas of its own shape grown by `margin` cells all
     round, at (margin, margin), and each transform of `mask` is compared against
@@ -323,7 +361,7 @@ def align(mask, leader, margin=ALIGN_MARGIN, floor=0.0, canvas=None,
         n_leader = int(np.count_nonzero(leader))
     height, width = canvas.shape
     best = (floor, None, None)
-    for var in variants(mask):
+    for vi, var in enumerate(variants(mask)):
         hv, wv = var.shape
         if abs(hv - hb) > margin or abs(wv - wb) > margin:
             continue
@@ -336,7 +374,7 @@ def align(mask, leader, margin=ALIGN_MARGIN, floor=0.0, canvas=None,
                                                           dx:dx + wv]))
                 score = inter / (nv + n_leader - inter) if inter else 0.0
                 if score > best[0]:
-                    best = (score, var, (dz, dx))
+                    best = (score, vi, (dz, dx))
     return (0.0, None, None) if best[1] is None else best
 
 
@@ -420,9 +458,11 @@ class Family:
         votes = mask_pad(leader, margin).astype(np.int64) * want[0][1]
         weight = want[0][1]
         for key, n in want[1:]:
-            _, var, off = align(key_mask(key), leader, margin)
-            if var is None:
+            member = key_mask(key)
+            _, vi, off = align(member, leader, margin)
+            if vi is None:
                 continue
+            var = variants(member)[vi]
             votes[off[0]:off[0] + var.shape[0],
                   off[1]:off[1] + var.shape[1]] += var * n
             weight += n
@@ -572,7 +612,7 @@ def collect(path, cell=CELL, cache_dir='cache', use_cache=True, verbose=True):
         got = footprint_mask(pts, holes, cell)
         if got is None:
             continue
-        mask, area, span = got
+        mask, area, span, _ = got
         norm = normalise(mask, span)
         if norm is None:
             continue

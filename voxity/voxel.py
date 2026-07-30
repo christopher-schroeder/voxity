@@ -185,7 +185,8 @@ def build_mesh(voxels):
     return quads
 
 
-def mesh_vertices(quads, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL):
+def mesh_vertices(quads, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL,
+                  basis=None):
     """Turn greedy quads into the shared vertex layout (see mesh.py).
 
     `scale` is the edge length of one voxel in world units and `offset` where
@@ -194,22 +195,35 @@ def mesh_vertices(quads, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL):
     is the *full-value* hue: `hsv_to_rgb` is linear in V at fixed H and S, so
     the shader multiplying in the per-cell value factor gives exactly what
     computing it per voxel would have.
+
+    `basis` is an optional 3x3 rotation applied after scaling and before the
+    offset, which is what lets a model stand on a building that is not aligned
+    to the compass. It must be a *rotation*: normals go through it unchanged in
+    length, and a reflection would turn every face inside out under back-face
+    culling. Mirror a model by mirroring its voxels instead.
     """
     mb = MeshBuilder()
     if not quads:
         return mb.pack()
     off = np.asarray(offset, dtype=np.float64)
+    rot = None if basis is None else np.asarray(basis, dtype=np.float64).T
     for normal, hue, corners in quads:
-        c = np.asarray(corners, dtype=np.float64) * scale + off
+        c = np.asarray(corners, dtype=np.float64) * scale
+        n = np.asarray(normal, dtype=np.float64)
+        if rot is not None:
+            c = c @ rot
+            n = n @ rot
+        c = c + off
         tris = np.array([c[0], c[1], c[2], c[0], c[2], c[3]], dtype=np.float32)
-        mb.add(tris, np.asarray(normal, dtype=np.float32),
+        mb.add(tris, n.astype(np.float32),
                np.asarray(color_rgb(hue, N_VALS - 1), dtype=np.float32), mat)
     return mb.pack()
 
 
-def model_vertices(voxels, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL):
+def model_vertices(voxels, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL,
+                   basis=None):
     """Convenience: voxel dict straight to vertices."""
-    return mesh_vertices(build_mesh(voxels), scale, offset, mat)
+    return mesh_vertices(build_mesh(voxels), scale, offset, mat, basis)
 
 
 def bounds(voxels):

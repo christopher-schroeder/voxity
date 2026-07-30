@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from voxity import extract, footprints, voxel
+from voxity import extract, footprints, houses, place, voxel
 from voxity.build import build_scene
 from voxity.camera import Camera
 from voxity.geo import square_bbox
@@ -105,6 +105,14 @@ def parse_args(argv=None):
                    help='overlap at which two footprints count as one shape')
     p.add_argument('--footprint-dir', default=footprints.OUT_DIR,
                    help='where the footprint models are written')
+    p.add_argument('--build-houses', action='store_true',
+                   help='write default voxel houses for every footprint and exit')
+    p.add_argument('--house-variants', type=int, default=houses.VARIANTS,
+                   help='how many houses to write per footprint')
+    p.add_argument('--house-dir', default=houses.OUT_DIR,
+                   help='where the house models live')
+    p.add_argument('--no-voxel-houses', action='store_true',
+                   help='extrude every building instead of placing voxel houses')
     p.add_argument('--model', default=voxel.DEFAULT_MODEL,
                    help=f'voxel model the editor opens (default {voxel.DEFAULT_MODEL})')
     return p.parse_args(argv)
@@ -131,7 +139,7 @@ def resolve_bbox(args):
     return square_bbox(lon, lat, args.size)
 
 
-MESH_VERSION = 1
+MESH_VERSION = 2
 
 
 def download_pbf(url, path):
@@ -187,10 +195,17 @@ def prepare(args, bbox=None):
     print(f'bbox  W {bbox[0]:.5f}  S {bbox[1]:.5f}  E {bbox[2]:.5f}  N {bbox[3]:.5f}')
     scene = extract.load(args.pbf, bbox, use_cache=not args.no_cache)
 
+    # The houses are data, not code, so no version constant sees them change —
+    # the cache key folds in the directory itself. '-flat' keys the run that
+    # extrudes everything, since that cannot be recovered from a cached mesh the
+    # way --no-trees can be.
+    houses = 'flat' if args.no_voxel_houses else place.signature(args.house_dir)
+
     mesh_file = None
     if not args.no_cache:
         key = extract.cache_key(args.pbf, bbox)
-        mesh_file = os.path.join('cache', f'mesh-{key}-{MESH_VERSION}.npz')
+        mesh_file = os.path.join('cache',
+                                 f'mesh-{key}-{MESH_VERSION}-{houses}.npz')
         if os.path.exists(mesh_file):
             with np.load(mesh_file) as data:
                 verts, trees = data['verts'], data['trees']
@@ -198,7 +213,7 @@ def prepare(args, bbox=None):
             return scene, verts, (trees[:0] if args.no_trees else trees)
 
     t0 = time.time()
-    verts, trees = build_scene(scene)
+    verts, trees = build_scene(scene, voxel_houses=not args.no_voxel_houses)
     print(f'  built in {time.time() - t0:.1f}s')
     if mesh_file:
         np.savez(mesh_file, verts=verts, trees=trees)
@@ -271,6 +286,19 @@ def build_footprints(args):
                      count=args.footprint_count,
                      per_family=args.footprint_sizes,
                      total=sum(counts.values()))
+
+
+def build_houses(args):
+    """Write default voxel houses for every surveyed footprint, then exit.
+
+    Offline like --build-footprints and for the same reason: it reads models off
+    disk and writes models back, and never touches GL or the extract.
+    """
+    entries = footprints.list_models(args.footprint_dir)
+    if not entries:
+        sys.exit(f'no footprints in {args.footprint_dir}/ — run '
+                 f'--build-footprints first')
+    houses.write(entries, args.house_dir, args.house_variants)
 
 
 def render_headless(args, scene, verts, trees):
@@ -585,6 +613,9 @@ def main():
         return
     if args.build_footprints:
         build_footprints(args)
+        return
+    if args.build_houses:
+        build_houses(args)
         return
     if args.screenshot:
         if args.editor:

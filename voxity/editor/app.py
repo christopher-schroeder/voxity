@@ -39,6 +39,12 @@ BRUSH_VAL_W = 26
 BRUSH_BTN_COL = (0.26, 0.28, 0.33)
 BRUSH_LBL_COL = (0.62, 0.66, 0.72)
 
+# What the model currently costs, under the brush steppers.
+STATS_TOP = BRUSH_TOP + 3 * BRUSH_ROW_H + ROW_GAP
+STATS_LINE_H = 17
+STATS_COL = (0.62, 0.66, 0.72)
+STATS_KEY_COL = (0.82, 0.86, 0.90)
+
 HOVER_COL = (0.95, 0.30, 0.30)      # the voxel a right-click would delete
 PLACE_COL = (0.30, 0.95, 0.40)      # where a left-click would add
 BLOCKED_COL = (0.55, 0.55, 0.58)    # ... and where it would do nothing
@@ -100,6 +106,23 @@ def brush_btn_at(mx, my):
     return None
 
 
+def model_stats(voxels, n_verts):
+    """Lines for the stats panel: what the model costs, and how big it is.
+
+    Vertices *and* triangles, because between them they show the greedy mesher
+    working: a flat wall of one hue is two triangles however many voxels it is,
+    so a voxel count that climbs while the triangle count does not is merging
+    doing its job. `height` is the model's own y extent, not its top — a model
+    built above the grid is as tall as it looks.
+    """
+    b = voxel.bounds(voxels)
+    lo, hi = b if b is not None else ((0, 0, 0), (0, 0, 0))
+    span = tuple(hi[i] - lo[i] for i in range(3))
+    return [f'{n_verts // 3:,} tris   {n_verts:,} verts',
+            f'height {span[1]}   {span[0]}x{span[2]} base',
+            f'{len(voxels):,} voxels']
+
+
 def seed_model():
     """Something on screen on a cold start, so the grid isn't just empty."""
     voxels = {}
@@ -152,6 +175,7 @@ class Editor:
         self.hover = None                     # cell under the cursor
         self.block = None                     # min corner of the block to place
         self.footprint = None                 # {(x, z)} the building may occupy
+        self.stats = model_stats(self.voxels, 0)
         self.set_footprint(_footprint_of(model_path))
         self.frame()                          # open looking at whatever loaded
 
@@ -178,6 +202,9 @@ class Editor:
     def remesh(self):
         verts = voxel.model_vertices(self.voxels)
         self.renderer.upload(verts)
+        # only place the counts can be right: they are what the mesher just
+        # produced, not an estimate of what it would produce
+        self.stats = model_stats(self.voxels, len(verts))
         self.dirty = False
         return verts
 
@@ -240,8 +267,14 @@ class Editor:
             ui.rect(x, y, w, h, voxel.color_rgb(i, voxel.CENTRE_VALUE))
         ui.outline(*swatch_rect(self.hue), (1.0, 1.0, 1.0), px=3)
         self._draw_brush(ui)
+        self._draw_stats(ui)
         menubar.draw(size[0], mouse)
         ui.flush()
+
+    def _draw_stats(self, ui):
+        for i, line in enumerate(self.stats):
+            ui.text(line, SWATCH_MARGIN, STATS_TOP + i * STATS_LINE_H,
+                    STATS_KEY_COL if i == 0 else STATS_COL)
 
     def _draw_brush(self, ui):
         """A '-' / size / '+' stepper per axis: the brush is sized per dimension."""
