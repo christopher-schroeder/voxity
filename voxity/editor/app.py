@@ -14,7 +14,7 @@ from .. import ui as uikit
 from .. import voxel
 from ..camera import OrbitCamera, screen_ray
 from . import io
-from .pick import BRUSH_EDGES, DEFAULT_BRUSH, brush_block, pick
+from .pick import DEFAULT_BRUSH, brush_block, pick, resize_brush
 from .render import EditorRenderer, box_lines
 
 DEFAULT_MODEL = voxel.DEFAULT_MODEL
@@ -27,6 +27,16 @@ SWATCH_MARGIN = 14
 SWATCH_TOP = uikit.MENUBAR_H + SWATCH_MARGIN
 ROW_GAP = 8
 
+# One stepper row per brush axis, below the swatches: 'X [-] 4 [+]'.
+BRUSH_TOP = SWATCH_TOP + SWATCH + ROW_GAP
+BRUSH_AXES = 'XYZ'
+BRUSH_ROW_H = 22
+BRUSH_BTN = 18
+BRUSH_LBL_W = 14
+BRUSH_VAL_W = 26
+BRUSH_BTN_COL = (0.26, 0.28, 0.33)
+BRUSH_LBL_COL = (0.62, 0.66, 0.72)
+
 HOVER_COL = (0.95, 0.30, 0.30)      # the voxel a right-click would delete
 PLACE_COL = (0.30, 0.95, 0.40)      # where a left-click would add
 
@@ -35,14 +45,18 @@ MENU_DEFS = [
               ('Save As...', 'save_as'), ('Export OBJ...', 'export_obj'),
               ('Export PNG...', 'export_png'), ('Back to menu', 'menu')]),
     ('View', [('Toggle Grid', 'toggle_grid'), ('Reset Camera', 'reset_cam'),
-              ('Frame Model', 'frame')]),
+              ('Frame Model', 'frame'), ('Reset Brush', 'reset_brush')]),
 ]
+
+# x/y/z resize one brush axis; shift shrinks instead of growing.
+BRUSH_KEYS = {pygame.K_x: 0, pygame.K_y: 1, pygame.K_z: 2}
 
 HELP = [
     ('L-drag orbit   R-drag pan   wheel zoom', True),
     ('L-click add   R-click delete', True),
     ('swatch or 1-0   hue', True),
-    (', .  brush size    G  grid', True),
+    ('X Y Z  grow brush axis   +shift  shrink', True),
+    (', .  shrink / grow all three    G  grid', True),
     ('S / L  save / load    F  frame model', True),
     ('ESC  back to the menu', True),
 ]
@@ -58,6 +72,24 @@ def swatch_at(mx, my):
         x, y, w, h = swatch_rect(i)
         if x <= mx <= x + w and y <= my <= y + h:
             return i
+    return None
+
+
+def brush_btn_rect(axis, delta):
+    """Rect of one brush stepper button; `delta` is -1 for '-' and +1 for '+'."""
+    x = SWATCH_MARGIN + BRUSH_LBL_W
+    if delta > 0:
+        x += BRUSH_BTN + BRUSH_VAL_W
+    return (x, BRUSH_TOP + axis * BRUSH_ROW_H, BRUSH_BTN, BRUSH_BTN)
+
+
+def brush_btn_at(mx, my):
+    """(axis, delta) of the brush stepper under the cursor, or None."""
+    for axis in range(3):
+        for delta in (-1, 1):
+            x, y, w, h = brush_btn_rect(axis, delta)
+            if x <= mx <= x + w and y <= my <= y + h:
+                return axis, delta
     return None
 
 
@@ -117,12 +149,12 @@ class Editor:
         vp = self.cam.projection(size[0] / max(size[1], 1)) @ self.cam.view()
         origin, direction = screen_ray(np.linalg.inv(vp), mouse, size)
         self.hover, info = pick(self.voxels, origin, direction)
-        self.block = brush_block(self.hover, info, BRUSH_EDGES[self.brush])
+        self.block = brush_block(self.hover, info, self.brush)
 
     def add(self):
         if self.block is None:
             return
-        for cell in voxel.block_cells(self.block, BRUSH_EDGES[self.brush]):
+        for cell in voxel.block_cells(self.block, self.brush):
             self.voxels[cell] = self.hue
         self.dirty = True
 
@@ -147,8 +179,7 @@ class Editor:
             if self.hover is not None:
                 boxes.append(box_lines(self.hover, 1, HOVER_COL))
             if self.block is not None:
-                boxes.append(box_lines(self.block, BRUSH_EDGES[self.brush],
-                                       PLACE_COL))
+                boxes.append(box_lines(self.block, self.brush, PLACE_COL))
         self.renderer.draw(self.cam, size[0] / max(size[1], 1),
                            self.show_grid, boxes)
 
@@ -163,18 +194,17 @@ class Editor:
         ui.flush()
 
     def _draw_brush(self, ui):
-        """Three nested squares, the active brush outlined."""
-        top = SWATCH_TOP + SWATCH + ROW_GAP
-        big = max(BRUSH_EDGES)
-        x = SWATCH_MARGIN
-        for i, e in enumerate(BRUSH_EDGES):
-            px = max(10, round(SWATCH * e / big))
-            y = top + (SWATCH - px)                  # bottom-align the squares
-            g = 0.80 if i == self.brush else 0.35
-            ui.rect(x, y, px, px, (g, g, g))
-            if i == self.brush:
-                ui.outline(x, y, px, px, (1.0, 1.0, 1.0), px=2)
-            x += SWATCH + 10
+        """A '-' / size / '+' stepper per axis: the brush is sized per dimension."""
+        for axis in range(3):
+            mx, my, bw, bh = brush_btn_rect(axis, -1)
+            ui.text_centred(BRUSH_AXES[axis], SWATCH_MARGIN + BRUSH_LBL_W // 2,
+                            my + bh // 2, BRUSH_LBL_COL)
+            for delta, glyph in ((-1, '-'), (1, '+')):
+                x, y, w, h = brush_btn_rect(axis, delta)
+                ui.rect(x, y, w, h, BRUSH_BTN_COL)
+                ui.text_centred(glyph, x + w // 2, y + h // 2)
+            ui.text_centred(str(self.brush[axis]),
+                            mx + bw + BRUSH_VAL_W // 2, my + bh // 2)
 
     def release(self):
         self.renderer.release()
@@ -223,6 +253,8 @@ def _menu_action(ed, action, ctx, size):
         ed.cam = OrbitCamera(target=voxel.centre(ed.voxels))
     elif action == 'frame':
         ed.frame()
+    elif action == 'reset_brush':
+        ed.brush = DEFAULT_BRUSH
     elif action == 'menu':
         return 'menu'
     return None
@@ -287,10 +319,13 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                         print(f'loaded {len(ed.voxels)} voxels from {ed.path}')
                     except (OSError, ValueError, KeyError) as exc:
                         print(f'could not load {ed.path}: {exc}')
-                elif k == pygame.K_COMMA:              # ',' smaller brush
-                    ed.brush = min(len(BRUSH_EDGES) - 1, ed.brush + 1)
-                elif k == pygame.K_PERIOD:             # '.' larger brush
-                    ed.brush = max(0, ed.brush - 1)
+                elif k == pygame.K_COMMA:              # ',' shrink every axis
+                    ed.brush = resize_brush(ed.brush, None, -1)
+                elif k == pygame.K_PERIOD:             # '.' grow every axis
+                    ed.brush = resize_brush(ed.brush, None, 1)
+                elif k in BRUSH_KEYS:                  # one axis at a time
+                    d = -1 if event.mod & pygame.KMOD_SHIFT else 1
+                    ed.brush = resize_brush(ed.brush, BRUSH_KEYS[k], d)
                 elif pygame.K_0 <= k <= pygame.K_9:
                     n = k - pygame.K_0                 # 0..9
                     d = 10 if n == 0 else n            # 1..10
@@ -321,8 +356,11 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                 if moved is not None and moved < DRAG_THRESHOLD:
                     if event.button == 1:
                         hit = swatch_at(*event.pos)
+                        step = brush_btn_at(*event.pos)
                         if hit is not None:
                             ed.hue = hit
+                        elif step is not None:
+                            ed.brush = resize_brush(ed.brush, *step)
                         else:
                             click_add = True
                     elif event.button == 3:

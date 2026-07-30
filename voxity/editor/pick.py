@@ -11,10 +11,10 @@ import numpy as np
 
 MAX_RAY_STEPS = 256
 
-# Every voxel is a unit cube. The brush stamps a solid E x E x E block of them,
-# so the three sizes place 64 / 8 / 1 voxels.
-BRUSH_EDGES = [4, 2, 1]
-DEFAULT_BRUSH = len(BRUSH_EDGES) - 1      # start with the single-voxel brush
+# Every voxel is a unit cube. The brush stamps a solid box of them, sized per
+# axis — walls and floors are the common shapes and neither is a cube.
+BRUSH_MIN, BRUSH_MAX = 1, 32
+DEFAULT_BRUSH = (1, 1, 1)
 
 
 def pick(voxels, origin, direction):
@@ -58,12 +58,34 @@ def pick(voxels, origin, direction):
     return None, None
 
 
-def brush_block(hit_cell, info, e):
-    """Min corner of the E x E x E block to stamp, or None.
+def resize_brush(size, axis, delta):
+    """`size` with `delta` added to one axis, or to all three when axis is None."""
+    s = list(size)
+    for i in (range(3) if axis is None else (axis,)):
+        s[i] = max(BRUSH_MIN, min(BRUSH_MAX, s[i] + delta))
+    return tuple(s)
 
-    `hit_cell`/`info` are what `pick` returned. The tangential axes snap to the
-    E-grid; along the hit normal the block sits on the empty side of the face
-    (or on the floor, when the ray only found ground).
+
+def _centred(cell, extent):
+    """Min corner of a run of `extent` cells centred on `cell`.
+
+    The brush moves in single cells, not in steps of its own size, so it can
+    sit anywhere — which means the cell you point at has to be *inside* it, and
+    the middle is the only place that reads as a cursor. Even extents lean one
+    cell to the negative side, since there is no true middle to pick.
+    """
+    return cell - (extent - 1) // 2
+
+
+def brush_block(hit_cell, info, size):
+    """Min corner of the `size` (sx, sy, sz) block to stamp, or None.
+
+    `hit_cell`/`info` are what `pick` returned. Along the hit normal the block
+    sits on the empty side of the face (or on the floor, when the ray only
+    found ground); the other two axes centre on the cell under the cursor.
+    Centring on y is held above the floor, since `voxel.block_cells` drops
+    cells below it — let it straddle and the outline would promise voxels that
+    never appear, which is what aiming a tall brush at a low wall does.
     """
     if hit_cell is not None:                  # placing against a voxel face
         normal = info
@@ -71,11 +93,14 @@ def brush_block(hit_cell, info, e):
         mn = []
         for i in range(3):
             if i == a:
-                mn.append(hit_cell[i] + 1 if normal[i] > 0 else hit_cell[i] - e)
+                mn.append(hit_cell[i] + 1 if normal[i] > 0
+                          else hit_cell[i] - size[i])
+            elif i == 1:
+                mn.append(max(0, _centred(hit_cell[i], size[i])))
             else:
-                mn.append((hit_cell[i] // e) * e)
+                mn.append(_centred(hit_cell[i], size[i]))
         return tuple(mn)
     if info is not None:                      # placing on the ground plane
         gx, _, gz = info
-        return ((gx // e) * e, 0, (gz // e) * e)
+        return (_centred(gx, size[0]), 0, _centred(gz, size[2]))
     return None

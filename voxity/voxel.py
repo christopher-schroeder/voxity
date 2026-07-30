@@ -232,11 +232,15 @@ def centre(voxels):
 
 # --- persistence -----------------------------------------------------------
 
-def block_cells(mn, e):
-    """Cells of an E x E x E block with min corner `mn` (skipping y < 0)."""
-    for i in range(e):
-        for j in range(e):
-            for k in range(e):
+def block_cells(mn, size):
+    """Cells of the block with min corner `mn` (skipping y < 0).
+
+    `size` is one edge length for a cube, or an (sx, sy, sz) triple.
+    """
+    sx, sy, sz = size if hasattr(size, '__len__') else (size,) * 3
+    for i in range(sx):
+        for j in range(sy):
+            for k in range(sz):
                 y = mn[1] + j
                 if y >= 0:
                     yield (mn[0] + i, y, mn[2] + k)

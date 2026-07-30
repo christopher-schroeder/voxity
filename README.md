@@ -22,10 +22,13 @@ on, and `ESC` from either takes you back to the menu.
 
 ## The editor
 
-Unit cubes on a grid, an orbiting camera, and a brush that stamps 1, 8 or 64 of
-them at a time. You pick the **hue**; the brightness is not yours to choose —
-it is a hash of the cell's position, so neighbouring voxels vary slightly and a
-given cell always looks the same. That is what gives a flat wall its mosaic.
+Unit cubes on a grid, an orbiting camera, and a brush that stamps a solid box
+of them. The box is sized **per axis**, 1 to 32 cells each — walls, floors and
+pillars are the shapes you actually build, and none of them is a cube — with a
+`- n +` stepper per dimension under the palette. You pick the **hue**; the
+brightness is not yours to choose — it is a hash of the cell's position, so
+neighbouring voxels vary slightly and a given cell always looks the same. That
+is what gives a flat wall its mosaic.
 
 | | |
 |---|---|
@@ -35,11 +38,19 @@ given cell always looks the same. That is what gives a flat wall its mosaic.
 | left-click | add a block on the green highlight |
 | right-click | delete the voxel under the red highlight |
 | click a swatch, `1`–`9` `0` | set the hue |
-| `,` `.` | shrink / grow the brush (1 / 8 / 64 voxels) |
+| `X` `Y` `Z` | grow the brush along that axis (`shift` to shrink) |
+| click a stepper | the same, with the mouse |
+| `,` `.` | shrink / grow all three axes at once |
 | `G` | floor grid |
 | `F` | frame the model |
 | `S` `L` | save / load the current model |
 | `ESC` | back to the menu |
+
+The block moves in **single cells** at any size, rather than snapping to a grid
+of its own size: it centres on the cell under the cursor, and sits on the empty
+side of whatever face you are pointing at. A tall brush aimed at a low wall is
+held above the floor instead of straddling it, so the green outline is always
+exactly what a click will place. **View → Reset Brush** puts it back to 1×1×1.
 
 **File** does New / Open / Save / Save As / Export OBJ / Export PNG through a
 native dialog when tkinter is available. Models are JSON under `models/`.

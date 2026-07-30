@@ -32,10 +32,14 @@ def _grid_lines():
     return np.array(seg, dtype='f4')
 
 
-def box_lines(mn, s, col):
-    """The 12 edges of a cube with min corner `mn` and edge length `s`."""
+def box_lines(mn, size, col):
+    """The 12 edges of the box with min corner `mn` and edge lengths `size`.
+
+    `size` is one edge length for a cube, or an (sx, sy, sz) triple.
+    """
+    sx, sy, sz = size if hasattr(size, '__len__') else (size,) * 3
     x, y, z = mn
-    c = [(x + i * s, y + j * s, z + k * s)
+    c = [(x + i * sx, y + j * sy, z + k * sz)
          for i in (0, 1) for j in (0, 1) for k in (0, 1)]
     # index bits are (i, j, k); an edge joins corners differing in one bit
     edges = [(a, a ^ b) for a in range(8) for b in (4, 2, 1) if not a & b]
