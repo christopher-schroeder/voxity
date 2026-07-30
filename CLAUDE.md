@@ -160,6 +160,11 @@ square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 
 # 12. the same square with every building extruded, for an A/B
 ./env/bin/voxity --place wandsbek --size 800 --no-voxel-houses --screenshot flat.png
+
+# 13. the post chain's switches, which is also the cheapest way to see what
+#     ambient occlusion and supersampling are each contributing
+./env/bin/voxity --place wandsbek --size 400 --no-ao --screenshot noao.png
+./env/bin/voxity --place wandsbek --size 400 --supersample 1 --screenshot raw.png
 ```
 
 (1) works because `main.run_windowed` and `main.render_headless` import moderngl and
@@ -186,6 +191,13 @@ second way that needs no window: draw into a standalone-EGL framebuffer instead 
 `SDL_VIDEODRIVER=dummy` plus a 16x16 `set_mode` first — not for GL, which comes from EGL,
 but because `ui._texture` calls `convert_alpha()` and that wants *a* pygame display
 surface.
+
+**The renderer's own resize path has no windowed test.** `Renderer._ensure_buffers`
+rebuilds the offscreen buffers whenever the window changes size, and `--frames` never
+resizes anything. Drive it directly instead: one `Renderer`, `render(fbo, cam, aspect,
+size=(w, h))` over a sequence of sizes including a degenerate one like 100x3, asserting
+`_buf_size` follows `supersample` and that the frame is not black. That also covers
+`release()` on a renderer that never rendered, where the buffers are still None.
 
 The invariant to test on the placement side is that a house lands **inside the building's
 own outline**, at every rotation. Build a ring from a plan's cells, turn it through a
@@ -272,7 +284,10 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
 - **voxity/build.py** — `build_scene` draws ground skirt → surfaces (by layer) → lines
   (by elev, layer) → buildings, through `MeshBuilder`.
 - **voxity/renderer.py** + **shaders.py** — shadow pass, scene pass, instanced trees,
-  fullscreen sky. GLSL lives as strings in shaders.py, sharing a `COMMON_LIGHTING` chunk.
+  fullscreen sky, then **ambient occlusion and a composite**. GLSL lives as strings in
+  shaders.py, sharing a `COMMON_LIGHTING` chunk. See "The look" below: the scene pass
+  writes linear light into an offscreen buffer and nothing before POST_FS makes a colour
+  you could look at.
 - **voxity/camera.py** — matrix helpers (`perspective`, `ortho`, `look_at`, `to_gl`),
   the fly camera, the editor's `OrbitCamera`, and `screen_ray` (the replacement for
   `gluUnProject`, which core profile does not have). **voxity/hud.py** — pygame-rendered
@@ -407,8 +422,12 @@ applied afterwards, because unlike `--no-trees` an extrusion cannot be recovered
 cached mesh that has a house in it.
 
 `--no-trees` is applied *after* the mesh cache is read (`main.prepare` slices `trees` to
-length zero), so trees are always meshed and stored: changing tree geometry still needs a
-`MESH_VERSION` bump, but toggling the flag never does.
+length zero), so trees are always meshed and stored: changing what `tree_instances`
+produces still needs a `MESH_VERSION` bump, but toggling the flag never does. `tree_mesh`
+is a different matter — the *shape* of a tree is built at `Renderer` construction and is
+not in any cache, so editing it needs no bump at all. Nothing about the grade or the post
+chain is cached either; only vertex colours are, which is why lightening `GROUND_COLOUR`
+was a bump and lowering `ambient` was not.
 
 The map key also folds in the pixel long edge, so `--map-size` gets its own file rather
 than silently reusing a differently-sized bake. Re-baking costs about 70 s for Hamburg at
@@ -530,6 +549,54 @@ do not round to the same twentieths. And scale invariance holds at the *family* 
 only — a 9.6 m square on a 1 m grid genuinely loses a corner cell that a 12 m one keeps,
 so asserting equal canonical keys across scales will fail; assert that `families()` puts
 them together.
+
+## The look
+
+The city is graded to a warm late-afternoon voxel-builder look. Four things carry it, and
+each one is easy to undo by accident:
+
+**Everything is drawn in linear light, and only POST_FS makes a picture.** The scene pass
+writes into an offscreen RGBA16F buffer; `SCENE_FS`, `TREE_FS` and `SKY_FS` all end at
+`apply_fog` and hand over unbounded linear values. Tone mapping there instead is not just
+untidy — ambient occlusion has to multiply the light *before* the curve compresses it, or
+the crevices it darkens come back out grey. It is also what lets the sky be graded like
+the ground it meets rather than the two meeting at a seam on the horizon. **A new
+material or program that draws into the scene buffer must not tone map.**
+
+**The curve is ACES-filmic, not Reinhard.** The old `x / (x + 0.85)` put a sunlit wall and
+one in shadow within a factor of 1.6 of each other on screen when the light on them
+differed by seven: the whole city read as an overcast day whatever the sun was doing.
+
+**`sun_palette` is warm at both ends.** A physical palette goes neutral by 30 degrees, and
+the default sun is at 28, so the warm end has to reach much further up than physics puts
+it or the sun does nothing you can see. `ambient` scales sky and bounce together and is
+the single number separating afternoon from overcast.
+
+**Ambient occlusion is contact darkening, not a dome.** `ao_radius` is 1.8 **metres** and
+that is small on purpose: at the 4.5 m that looked right on a street corner, one radius
+covers an entire tree canopy and the tree goes uniformly black. Three details in AO_FS
+each cost a debugging session:
+
+* The normal comes from `dFdx`/`dFdy` of the reconstructed view position, since the vertex
+  layout has no room for a normal buffer. It must be flipped to face the *camera*
+  (`dot(N, normalize(-P))`), not merely to +z.
+* The depth bias must grow with the depth slope. A surface seen edge-on moves metres
+  across one pixel and a constant bias lets it occlude itself — whole roofs come out
+  black.
+* `smoothstep` with `edge0 > edge1` is undefined in GLSL and returns 1 everywhere on this
+  driver. That is how the vignette silently did nothing for three iterations.
+
+**Antialiasing is supersampling, not MSAA.** `SUPERSAMPLE = 1.5` renders the scene buffer
+larger and the composite's LINEAR fetch is the downsample. MSAA cannot help with what is
+here even when the window requests it: the voxel mosaic and the value hash are computed
+*inside* triangles, where multisampling takes one sample. It costs about 45% of the frame
+— roughly 47 fps against 81 at 1600x950 over a 1200 m square — so `--supersample 1` is the
+knob to reach for on a slow machine, not `--no-ao`, which is free to within noise.
+
+Every grading constant lives as an attribute on `Renderer.__init__` rather than inside
+POST_FS, so they can be swept without recompiling a shader — `scratchpad/sweep.py`-style
+harnesses that instantiate a Renderer and `setattr` overrides are how these were found,
+and one-at-a-time iteration is much slower than tiling four at once.
 
 ## The editor's triangle overlay
 

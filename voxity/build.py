@@ -9,15 +9,18 @@ instanced through their own program in renderer.py.
 import numpy as np
 from mapbox_earcut import triangulate_float32
 
-from . import place
+from . import place, voxel
 from .geo import dedup_ring, oriented_box, signed_area
 from .mesh import MAT_MATTE, MAT_WATER, MeshBuilder, orient_triangles
 
 
 LAYER_STEP = 0.15      # vertical spacing between flat ground layers
 CASING_DROP = 0.06
-GROUND_COLOUR = (0.30, 0.31, 0.28)
-SURROUND_COLOUR = (0.27, 0.29, 0.26)
+# Light enough that a cast shadow still has something in it. At the 0.30 these
+# started at, bare ground in shadow came out at a linear 0.02 and read as a hole
+# in the frame rather than as ground.
+GROUND_COLOUR = (0.44, 0.46, 0.37)
+SURROUND_COLOUR = (0.40, 0.43, 0.35)
 UP = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
 
@@ -242,31 +245,82 @@ def _add_building(mb, b):
 
 # --- trees ------------------------------------------------------------------
 
-def tree_mesh(segments=7):
-    """Unit tree (trunk + two canopy cones), 1 m tall, 1 m wide."""
+# The canopy is a voxel blob, not a cone. Smooth cones were the one thing left
+# in the frame that did not read as built out of cubes, and the flat facets they
+# gave the light made a street of them look like plastic. These are cell counts
+# across and up; every cell costs geometry that is then instanced over every
+# tree in the square, so they stay small.
+CANOPY_WIDE, CANOPY_TALL = 9, 12
+
+
+def _blob(nx, ny, ragged, rng):
+    """An ellipsoid `nx` cells across and `ny` up, its surface cells nibbled.
+
+    The two counts are separate because they have to be: squashing a cubic grid
+    instead just clips the ellipsoid at the top and bottom, and a canopy meant
+    to be tall comes out a cylinder with hard vertical sides.
+
+    The nibbling stops five hundred instances of one mesh reading as five
+    hundred copies of one mesh. Keep it small — a bite one cell deep is a slot
+    with no light in it, and ambient occlusion draws it as a black stripe.
+    """
+    cx, cy = (nx - 1) / 2, (ny - 1) / 2
+    cells = {}
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nx):
+                d = (((i - cx) / (0.5 * nx)) ** 2 + ((k - cx) / (0.5 * nx)) ** 2
+                     + ((j - cy) / (0.5 * ny)) ** 2)
+                if d <= 1.0 - ragged * rng.random():
+                    cells[(i, j, k)] = 0
+    return cells
+
+
+def _box(nx, ny):
+    """A solid nx by ny by nx block of cells, for the trunk."""
+    return {(i, j, k): 0 for i in range(nx) for j in range(ny)
+            for k in range(nx)}
+
+
+def _voxel_tris(cells, scale, offset):
+    """Greedy-meshed voxel cells as (positions, normals) in the unit tree frame.
+
+    Reuses the editor's mesher rather than emitting six faces a cell: a canopy
+    is mostly flat sides, and merging takes it from about a thousand triangles
+    to two hundred — which matters, because this mesh is drawn once per tree.
+    """
+    scale = np.asarray(scale, dtype=np.float64)
+    offset = np.asarray(offset, dtype=np.float64)
     pos, nrm = [], []
-    ang = np.linspace(0, 2 * np.pi, segments, endpoint=False)
-    cs, sn = np.cos(ang), np.sin(ang)
+    for normal, _, corners in voxel.build_mesh(cells):
+        c = np.asarray(corners, dtype=np.float64) * scale + offset
+        for a, b, d in ((0, 1, 2), (0, 2, 3)):
+            pos += [c[a], c[b], c[d]]
+            nrm += [normal] * 3
+    return pos, nrm
 
-    def cone(y0, y1, r0, r1):
-        for i in range(segments):
-            j = (i + 1) % segments
-            a = (r0 * cs[i], y0, r0 * sn[i])
-            b = (r0 * cs[j], y0, r0 * sn[j])
-            c = (r1 * cs[j], y1, r1 * sn[j])
-            d = (r1 * cs[i], y1, r1 * sn[i])
-            for tri in ((a, b, c), (a, c, d)):
-                for v in tri:
-                    pos.append(v)
-                    n = np.array([v[0], (r0 - r1) * 0.5, v[2]], dtype=np.float32)
-                    ln = np.linalg.norm(n)
-                    nrm.append(n / ln if ln > 1e-6 else UP)
 
-    cone(0.0, 0.36, 0.05, 0.04)       # trunk
-    cone(0.30, 0.52, 0.13, 0.30)      # canopy flares out
-    cone(0.52, 0.80, 0.30, 0.24)      # broadest part
-    cone(0.80, 1.0, 0.24, 0.02)       # crown
-    trunk_verts = segments * 6
+def tree_mesh(seed=11):
+    """Unit tree: a blocky trunk under a voxelised canopy, 1 m tall, 1 m wide.
+
+    `in_pos.x/z` are in units of the instance radius and `in_pos.y` of its
+    height (see TREE_VS), so the canopy is built to span a little under a third
+    of the radius either side — the same proportions the cones it replaced had.
+    Trunk vertices come first, which is the contract `Renderer._init_trees`
+    relies on to colour them separately.
+    """
+    rng = np.random.default_rng(seed)
+    pos, nrm = _voxel_tris(_box(2, 2), (0.055, 0.16, 0.055),
+                           (-0.055, 0.0, -0.055))
+    trunk_verts = len(pos)
+
+    p2, n2 = _voxel_tris(
+        _blob(CANOPY_WIDE, CANOPY_TALL, 0.05, rng),
+        (0.74 / CANOPY_WIDE, 0.74 / CANOPY_TALL, 0.74 / CANOPY_WIDE),
+        (-0.37, 0.26, -0.37))
+    pos += p2
+    nrm += n2
+
     p = np.array(pos, dtype=np.float32)
     n = np.array(nrm, dtype=np.float32)
     orient_triangles(p, n)

@@ -258,7 +258,7 @@ built-in `--place` presets are all Hamburg.
 | wheel | movement speed |
 | `,` `.` | time of day (sun height) |
 | `[` `]` | sun azimuth |
-| `T` `L` `G` | trees, shadows, fog |
+| `T` `L` `G` `O` | trees, shadows, fog, ambient occlusion |
 | `R` | back to the start position |
 | `M` | back to the overview map |
 | `P` | screenshot into `screenshots/` |
@@ -275,10 +275,12 @@ built-in `--place` presets are all Hamburg.
 --center LAT,LON  centre of the square
 --bbox W,S,E,N    explicit box in degrees
 --size METRES     edge length of the square, and of the grid cells (default 1200)
---sun AZ,EL       sun azimuth/elevation in degrees (default 235,34)
+--sun AZ,EL       sun azimuth/elevation in degrees (default 240,28)
 --view YAW,PITCH,ALT   starting camera
 --width --height  window size
 --no-trees --no-shadows --no-cache
+--no-ao           turn off ambient occlusion
+--supersample F   render F times the window size and downsample (default 1.5)
 --screenshot OUT.png   render one frame offscreen and exit
 --frames N        quit after N frames (smoke test)
 --build-map       bake the overview map offscreen and exit
@@ -321,7 +323,9 @@ check that the voxel shader still compiles.
 * **Water** — areas and waterways, with a rippling specular in the shader.
 * **Land cover** — parks, forest, sand, farmland, pitches, parking, industrial
   and residential landuse, stacked in layers so they don't z-fight.
-* **Trees** — every `natural=tree` node, instanced, randomised in size.
+* **Trees** — every `natural=tree` node, instanced, randomised in size. The
+  canopy is a voxel blob rather than a cone, so foliage is built out of cubes
+  like everything else.
 
 Anything crossing the edge of the square is clipped to it; buildings that
 straddle the edge are dropped rather than sliced.
@@ -361,6 +365,26 @@ city have to agree on, and touches neither GL nor pygame.
 
 Coordinates are projected to metres around the centre of the square:
 x east, z south, y up. The editor works in unit cells with the same axes.
+
+## The look
+
+The city is graded for a warm late afternoon. Everything is drawn into an
+offscreen buffer in linear light and only turned into a picture at the end,
+which is what lets **ambient occlusion** darken the light itself rather than the
+image of it — so walls meet the ground in a soft shadow, eaves and voxel steps
+get a crevice, and the whole thing stops looking like flat-shaded cardboard.
+After that comes a filmic curve, a warm/cool split tone and a vignette.
+
+Antialiasing is supersampling: the scene is rendered half again as large as the
+window and scaled down. That is not just for edges — the voxel brightness mosaic
+is computed inside triangles, where multisampling can do nothing at all. It
+costs roughly a third of the frame rate, and `--supersample 1` turns it off.
+Ambient occlusion is free by comparison; `--no-ao` and the `O` key are there to
+see what it is doing, not to speed anything up.
+
+The sun stays warm at every height it can be at, rather than going neutral at
+midday the way a physical model would. Sun position is still `--sun AZ,EL` and
+`,` `.` `[` `]` still move it, but the look is built around the default.
 
 ## Caching
 

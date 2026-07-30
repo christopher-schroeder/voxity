@@ -52,7 +52,7 @@ HELP_LINES = [
     ('wheel  speed', True),
     (', .  time of day', True),
     ('[ ]  sun azimuth', True),
-    ('T trees  L shadows  G fog', True),
+    ('T trees  L shadows  G fog  O occlusion', True),
     ('R reset  P screenshot  F1 help', True),
     ('M  back to the map', True),
     ('ESC  release / back to the menu', True),
@@ -75,9 +75,16 @@ def parse_args(argv=None):
                         'map picker\'s grid cells (default 1200)')
     p.add_argument('--width', type=int, default=1600)
     p.add_argument('--height', type=int, default=950)
-    p.add_argument('--sun', default='235,34', help='AZIMUTH,ELEVATION in degrees')
+    p.add_argument('--sun', default='240,28',
+                   help='AZIMUTH,ELEVATION in degrees (default is late afternoon:\n'
+                        'low and warm, which is what the look is built around)')
     p.add_argument('--no-trees', action='store_true')
     p.add_argument('--no-shadows', action='store_true')
+    p.add_argument('--no-ao', action='store_true',
+                   help='turn off screen-space ambient occlusion')
+    p.add_argument('--supersample', type=float, default=None,
+                   help='render the scene this much larger than the window '
+                        'and downsample (default 1.5; 1 turns it off)')
     p.add_argument('--no-cache', action='store_true')
     p.add_argument('--screenshot', help='render one frame headlessly to this PNG')
     p.add_argument('--view', help='initial camera as YAW,PITCH,ALTITUDE')
@@ -139,7 +146,7 @@ def resolve_bbox(args):
     return square_bbox(lon, lat, args.size)
 
 
-MESH_VERSION = 2
+MESH_VERSION = 3
 
 
 def download_pbf(url, path):
@@ -301,6 +308,14 @@ def build_houses(args):
     houses.write(entries, args.house_dir, args.house_variants)
 
 
+def tune_renderer(r, args):
+    """Apply the command-line rendering switches to a fresh Renderer."""
+    r.shadows = not args.no_shadows
+    r.ao = not args.no_ao
+    if args.supersample:
+        r.supersample = max(0.25, args.supersample)
+
+
 def render_headless(args, scene, verts, trees):
     import pygame
     from voxity.renderer import Renderer
@@ -313,7 +328,7 @@ def render_headless(args, scene, verts, trees):
 
     az, el = (float(v) for v in args.sun.split(','))
     r = Renderer(ctx, verts, trees, scene.extent, az, el)
-    r.shadows = not args.no_shadows
+    tune_renderer(r, args)
     cam = make_camera(scene, args.view)
     r.render(fbo, cam, w / h)
     ctx.finish()
@@ -396,7 +411,7 @@ def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
     ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
     az, el = (float(v) for v in args.sun.split(','))
     renderer = Renderer(ctx, verts, trees, scene.extent, az, el)
-    renderer.shadows = not args.no_shadows
+    tune_renderer(renderer, args)
     cam = make_camera(scene, args.view)
     home = (cam.pos.copy(), cam.yaw, cam.pitch)
 
@@ -458,6 +473,8 @@ def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
                     renderer.show_trees = not renderer.show_trees
                 elif k == pygame.K_l:
                     renderer.shadows = not renderer.shadows
+                elif k == pygame.K_o:
+                    renderer.ao = not renderer.ao
                 elif k == pygame.K_g:
                     renderer.fog_density = (0.0 if renderer.fog_density > 0
                                             else default_fog)
@@ -489,7 +506,7 @@ def fly(ctx, args, scene, verts, trees, overlay, help_overlay, size):
 
         ctx.screen.use()
         ctx.viewport = (0, 0, *size)
-        renderer.render(ctx.screen, cam, size[0] / size[1], dt)
+        renderer.render(ctx.screen, cam, size[0] / size[1], dt, size=size)
 
         fps = fps * 0.92 + (1.0 / max(dt, 1e-4)) * 0.08
         lon, lat = scene.projection.inverse(cam.pos[0], cam.pos[2])
