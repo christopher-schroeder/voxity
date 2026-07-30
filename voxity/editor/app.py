@@ -10,10 +10,12 @@ import os
 import numpy as np
 import pygame
 
+from .. import footprints
 from .. import ui as uikit
 from .. import voxel
 from ..camera import OrbitCamera, screen_ray
 from . import io
+from .choose import choose_footprint
 from .pick import DEFAULT_BRUSH, brush_block, pick, resize_brush
 from .render import EditorRenderer, box_lines
 
@@ -39,6 +41,7 @@ BRUSH_LBL_COL = (0.62, 0.66, 0.72)
 
 HOVER_COL = (0.95, 0.30, 0.30)      # the voxel a right-click would delete
 PLACE_COL = (0.30, 0.95, 0.40)      # where a left-click would add
+BLOCKED_COL = (0.55, 0.55, 0.58)    # ... and where it would do nothing
 
 MENU_DEFS = [
     ('File', [('New', 'new'), ('Open...', 'open'), ('Save', 'save'),
@@ -46,6 +49,9 @@ MENU_DEFS = [
               ('Export PNG...', 'export_png'), ('Back to menu', 'menu')]),
     ('View', [('Toggle Grid', 'toggle_grid'), ('Reset Camera', 'reset_cam'),
               ('Frame Model', 'frame'), ('Reset Brush', 'reset_brush')]),
+    ('Ground', [('Choose Footprint...', 'fp_choose'),
+                ('Open Footprint File...', 'fp_open'),
+                ('Clear Footprint', 'fp_clear')]),
 ]
 
 # x/y/z resize one brush axis; shift shrinks instead of growing.
@@ -58,6 +64,7 @@ HELP = [
     ('X Y Z  grow brush axis   +shift  shrink', True),
     (', .  shrink / grow all three    G  grid', True),
     ('S / L  save / load    F  frame model', True),
+    ('B  choose a footprint to build on', True),
     ('ESC  back to the menu', True),
 ]
 
@@ -105,6 +112,14 @@ def seed_model():
     return voxels
 
 
+def _footprint_of(path):
+    """The ground a saved model recorded, or None. Never raises."""
+    try:
+        return voxel.load_footprint(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def load_or_seed(path):
     """The model at `path`, or the seed scene when there isn't a usable one.
 
@@ -136,7 +151,29 @@ class Editor:
         self.dirty = True
         self.hover = None                     # cell under the cursor
         self.block = None                     # min corner of the block to place
+        self.footprint = None                 # {(x, z)} the building may occupy
+        self.set_footprint(_footprint_of(model_path))
         self.frame()                          # open looking at whatever loaded
+
+    def set_footprint(self, cells):
+        """Constrain building to `cells`, or lift the constraint with None.
+
+        Voxels already outside are left alone rather than deleted — the ground
+        is a guide for what you build next, and silently eating work because a
+        plan was swapped would be the wrong trade.
+        """
+        self.footprint = set(cells) if cells else None
+        self.renderer.set_footprint(self.footprint)
+        if self.footprint:
+            stray = sum(1 for x, _, z in self.voxels if (x, z) not in self.footprint)
+            if stray:
+                print(f'note: {stray} voxel(s) sit outside the footprint')
+
+    def allowed(self, cells):
+        """The cells of `cells` the footprint permits."""
+        if self.footprint is None:
+            return list(cells)
+        return [c for c in cells if (c[0], c[2]) in self.footprint]
 
     def remesh(self):
         verts = voxel.model_vertices(self.voxels)
@@ -154,7 +191,10 @@ class Editor:
     def add(self):
         if self.block is None:
             return
-        for cell in voxel.block_cells(self.block, self.brush):
+        cells = self.allowed(voxel.block_cells(self.block, self.brush))
+        if not cells:
+            return
+        for cell in cells:
             self.voxels[cell] = self.hue
         self.dirty = True
 
@@ -163,9 +203,16 @@ class Editor:
             self.dirty = True
 
     def frame(self):
-        """Point the camera at the model and back off far enough to see it."""
-        self.cam.target = voxel.centre(self.voxels)
-        b = voxel.bounds(self.voxels)
+        """Point the camera at the model and back off far enough to see it.
+
+        The footprint counts as part of what to look at: opening a bare plan
+        would otherwise frame an empty model and leave the ground off screen.
+        """
+        seen = dict(self.voxels)
+        if self.footprint:
+            seen.update({(x, 0, z): 0 for x, z in self.footprint})
+        self.cam.target = voxel.centre(seen)
+        b = voxel.bounds(seen)
         if b is not None:
             lo, hi = b
             span = max(hi[i] - lo[i] for i in range(3))
@@ -179,7 +226,10 @@ class Editor:
             if self.hover is not None:
                 boxes.append(box_lines(self.hover, 1, HOVER_COL))
             if self.block is not None:
-                boxes.append(box_lines(self.block, self.brush, PLACE_COL))
+                fits = bool(self.allowed(voxel.block_cells(self.block,
+                                                           self.brush)))
+                boxes.append(box_lines(self.block, self.brush,
+                                       PLACE_COL if fits else BLOCKED_COL))
         self.renderer.draw(self.cam, size[0] / max(size[1], 1),
                            self.show_grid, boxes)
 
@@ -223,6 +273,7 @@ def _menu_action(ed, action, ctx, size):
                 ed.voxels = voxel.load(p)
                 ed.path = p
                 ed.dirty = True
+                ed.set_footprint(_footprint_of(p))
                 ed.frame()
                 print(f'loaded {len(ed.voxels)} voxels from {p}')
             except (OSError, ValueError, KeyError) as exc:
@@ -255,16 +306,60 @@ def _menu_action(ed, action, ctx, size):
         ed.frame()
     elif action == 'reset_brush':
         ed.brush = DEFAULT_BRUSH
+    elif action == 'fp_choose':
+        _choose_ground(ed, ctx, size)
+    elif action == 'fp_open':
+        p = io.ask_path(False, 'Open footprint', footprints.OUT_DIR,
+                        [('JSON', '*.json'), ('All files', '*.*')])
+        if p:
+            _set_ground_from(ed, p)
+    elif action == 'fp_clear':
+        ed.set_footprint(None)
+        print('footprint cleared')
     elif action == 'menu':
         return 'menu'
     return None
+
+
+def _choose_ground(ed, ctx, size):
+    """Run the footprint picker and apply what comes back."""
+    entries = footprints.list_models()
+    if not entries:
+        print(f'no footprints in {footprints.OUT_DIR}/ — run '
+              f'`voxity --build-footprints` first')
+        return
+    ui = uikit.UI(ctx)
+    try:
+        picked = choose_footprint(ctx, ui, entries, size)
+    finally:
+        ui.release()
+    if picked:
+        ed.set_footprint(picked['cells'])
+        ed.frame()
+        print(f'building on {picked["name"]} '
+              f'({picked["w"]}x{picked["h"]} m, {len(picked["cells"])} cells)')
+
+
+def _set_ground_from(ed, path):
+    """Use any model file's outline as the ground."""
+    try:
+        cells = footprints.load_cells(path)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f'could not read {path}: {exc}')
+        return
+    if not cells:
+        print(f'{path} has no cells to stand on')
+        return
+    ed.set_footprint(cells)
+    ed.frame()
+    print(f'building on {os.path.basename(path)} ({len(cells)} cells)')
 
 
 def _save(ed, path):
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
-    n = voxel.save(ed.voxels, path)
+    n = voxel.save(ed.voxels, path, ed.footprint)
     print(f'saved {n} voxels to {path}')
 
 
@@ -312,10 +407,13 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                     ed.frame()
                 elif k == pygame.K_s:
                     _save(ed, ed.path)
+                elif k == pygame.K_b:
+                    _choose_ground(ed, ctx, size)
                 elif k == pygame.K_l:
                     try:
                         ed.voxels = voxel.load(ed.path)
                         ed.dirty = True
+                        ed.set_footprint(_footprint_of(ed.path))
                         print(f'loaded {len(ed.voxels)} voxels from {ed.path}')
                     except (OSError, ValueError, KeyError) as exc:
                         print(f'could not load {ed.path}: {exc}')

@@ -246,19 +246,39 @@ def block_cells(mn, size):
                     yield (mn[0] + i, y, mn[2] + k)
 
 
-def save(voxels, path):
+def save(voxels, path, footprint=None):
+    """Write a model. `footprint` is the (x, z) ground it was built on, if any.
+
+    Stored as cells rather than as a path to the footprint file: a model has to
+    keep meaning the same thing after the survey is re-run underneath it, and
+    re-running writes different files whenever the grouping changes.
+    """
     data = {
         'sat': PALETTE_SAT, 'n_hues': N_HUES, 'n_vals': N_VALS,
         'voxels': [[int(x), int(y), int(z), int(hue)]
                    for (x, y, z), hue in voxels.items()],
     }
+    if footprint:
+        data['footprint'] = [[int(x), int(z)] for x, z in sorted(footprint)]
     with open(path, 'w') as fh:
         json.dump(data, fh)
     return len(voxels)
 
 
+def load_footprint(path):
+    """The ground a model was built on, as {(x, z)}, or None if it has none."""
+    with open(path) as fh:
+        data = json.load(fh)
+    cells = data.get('footprint')
+    return {(int(x), int(z)) for x, z in cells} if cells else None
+
+
 def load(path):
-    """Read a model. Raises OSError if it isn't there."""
+    """Read a model. Raises OSError if it isn't there.
+
+    Only the voxels — `load_footprint` reads the ground separately, so every
+    existing caller keeps getting exactly what it always did.
+    """
     with open(path) as fh:
         data = json.load(fh)
     voxels = {}

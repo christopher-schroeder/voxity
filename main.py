@@ -103,7 +103,7 @@ def parse_args(argv=None):
                    help='how many real sizes of each shape to write')
     p.add_argument('--footprint-iou', type=float, default=footprints.IOU_JOIN,
                    help='overlap at which two footprints count as one shape')
-    p.add_argument('--footprint-dir', default='models/footprints',
+    p.add_argument('--footprint-dir', default=footprints.OUT_DIR,
                    help='where the footprint models are written')
     p.add_argument('--model', default=voxel.DEFAULT_MODEL,
                    help=f'voxel model the editor opens (default {voxel.DEFAULT_MODEL})')

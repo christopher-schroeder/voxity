@@ -44,6 +44,7 @@ is what gives a flat wall its mosaic.
 | `G` | floor grid |
 | `F` | frame the model |
 | `S` `L` | save / load the current model |
+| `B` | choose a footprint to build on |
 | `ESC` | back to the menu |
 
 The block moves in **single cells** at any size, rather than snapping to a grid
@@ -51,6 +52,20 @@ of its own size: it centres on the cell under the cursor, and sits on the empty
 side of whatever face you are pointing at. A tall brush aimed at a low wall is
 held above the floor instead of straddling it, so the green outline is always
 exactly what a click will place. **View → Reset Brush** puts it back to 1×1×1.
+
+### Building on a footprint
+
+`B`, or **Ground → Choose Footprint**, opens a picker of the plans the survey
+found (see below) and makes one the **ground**: its outline is drawn on the
+floor, and it becomes the limit you build inside. Voxels outside it are refused
+— the placement box turns grey where a click would do nothing — while height
+stays free, so you build up rather than out. **Ground → Clear Footprint** lifts
+the limit again, and **Open Footprint File** takes any model at all, so a
+finished house can serve as the outline for the next one.
+
+Choosing a ground never deletes anything: voxels already outside it are left
+where they are and merely counted on the console. The footprint is saved into
+the model, so reopening a half-built house puts its limits back.
 
 **File** does New / Open / Save / Save As / Export OBJ / Export PNG through a
 native dialog when tkinter is available. Models are JSON under `models/`.

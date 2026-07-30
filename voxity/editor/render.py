@@ -18,6 +18,10 @@ GRID_COL = (0.30, 0.30, 0.34)
 AXIS_X_COL = (0.55, 0.30, 0.30)
 AXIS_Z_COL = (0.30, 0.30, 0.55)
 
+# The chosen footprint: its cell edges, and the boundary you cannot build past.
+FOOT_IN_COL = (0.32, 0.46, 0.38)
+FOOT_EDGE_COL = (0.45, 0.95, 0.60)
+
 
 def _grid_lines():
     """Line segments for the floor grid, with brighter centre axes."""
@@ -30,6 +34,35 @@ def _grid_lines():
     seg += [(-GRID_HALF, 0, 0, *AXIS_X_COL), (GRID_HALF, 0, 0, *AXIS_X_COL)]
     seg += [(0, 0, -GRID_HALF, *AXIS_Z_COL), (0, 0, GRID_HALF, *AXIS_Z_COL)]
     return np.array(seg, dtype='f4')
+
+
+def footprint_lines(cells, inner=FOOT_IN_COL, edge=FOOT_EDGE_COL, y=0.0):
+    """Line segments for a footprint: cell edges, then its outer boundary.
+
+    Returns (inside, border) as two arrays so the caller can draw them at
+    different depths — the mesh should bury the interior as the building rises,
+    while the border has to stay legible, since it is the limit you are building
+    against.
+    """
+    cells = set(cells)
+    inside, border = [], []
+    for x, z in cells:
+        # each cell contributes its -x and -z edge, plus a +x/+z edge only
+        # where there is no neighbour to contribute it instead: every edge is
+        # emitted exactly once, and a boundary edge is one with no neighbour
+        for dx, dz, a, b in ((-1, 0, (x, z), (x, z + 1)),
+                             (1, 0, (x + 1, z), (x + 1, z + 1)),
+                             (0, -1, (x, z), (x + 1, z)),
+                             (0, 1, (x, z + 1), (x + 1, z + 1))):
+            if (x + dx, z + dz) in cells:
+                if dx > 0 or dz > 0:            # shared: let one side emit it
+                    continue
+                seg, col = inside, inner
+            else:
+                seg, col = border, edge
+            seg += [(a[0], y, a[1], *col), (b[0], y, b[1], *col)]
+    return (np.array(inside, dtype='f4').reshape(-1, 6),
+            np.array(border, dtype='f4').reshape(-1, 6))
 
 
 def box_lines(mn, size, col):
@@ -74,6 +107,25 @@ class EditorRenderer:
         self.box_vao = ctx.vertex_array(
             self.line_prog, [(self.box_vbo, '3f 3f', 'in_pos', 'in_col')])
 
+        self.foot_vbo = self.foot_vao = None
+        self.foot_inside = self.foot_border = 0
+
+    def set_footprint(self, cells):
+        """Replace the ground outline. `cells` is {(x, z)}, or None for none."""
+        if self.foot_vao is not None:
+            self.foot_vao.release()
+            self.foot_vbo.release()
+            self.foot_vao = self.foot_vbo = None
+        self.foot_inside = self.foot_border = 0
+        if not cells:
+            return
+        inside, border = footprint_lines(cells)
+        data = np.vstack([inside, border]) if len(inside) else border
+        self.foot_inside, self.foot_border = len(inside), len(border)
+        self.foot_vbo = self.ctx.buffer(data.tobytes())
+        self.foot_vao = self.ctx.vertex_array(
+            self.line_prog, [(self.foot_vbo, '3f 3f', 'in_pos', 'in_col')])
+
     def upload(self, verts):
         """Replace the voxel mesh. `verts` is the (N, 10) shared layout."""
         if self.vao is not None:
@@ -101,11 +153,23 @@ class EditorRenderer:
         ctx.disable(moderngl.DEPTH_TEST)
         if show_grid:
             self.grid_vao.render(moderngl.LINES, vertices=self.grid_count)
+        # the footprint's interior goes under the model, so the building covers
+        # its own ground as it rises
+        if self.foot_inside:
+            self.foot_vao.render(moderngl.LINES, vertices=self.foot_inside)
 
         ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
         ctx.cull_face = 'back'
         if self.n_verts:
             self.vao.render(moderngl.TRIANGLES, vertices=self.n_verts)
+
+        # the border stays on top of everything: it is the limit being built
+        # against, and is useless the moment a wall hides it
+        if self.foot_border:
+            ctx.disable(moderngl.DEPTH_TEST)
+            self.foot_vao.render(moderngl.LINES, vertices=self.foot_border,
+                                 first=self.foot_inside)
+            ctx.enable(moderngl.DEPTH_TEST)
 
         # hover / placement boxes always on top, so they read as a cursor
         if boxes:
@@ -119,6 +183,9 @@ class EditorRenderer:
         if self.vao is not None:
             self.vao.release()
             self.vbo.release()
+        if self.foot_vao is not None:
+            self.foot_vao.release()
+            self.foot_vbo.release()
         for obj in (self.grid_vao, self.grid_vbo, self.box_vao, self.box_vbo,
                     self.voxel_prog, self.line_prog):
             obj.release()

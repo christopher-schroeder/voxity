@@ -95,6 +95,9 @@ MAX_CANDIDATES = 20_000
 
 FOOTPRINT_HUE = 20            # what the written footprint layer is coloured
 
+# Where --build-footprints writes, and where the editor looks for grounds.
+OUT_DIR = 'models/footprints'
+
 
 # --- rasterising one footprint ---------------------------------------------
 
@@ -595,6 +598,61 @@ def footprint_voxels(mask, hue=FOOTPRINT_HUE):
     """One voxel layer at y=0 for a mask, min corner at the origin."""
     return {(int(x), 0, int(z)): hue
             for z, x in zip(*np.nonzero(mask), strict=True)}
+
+
+def load_cells(path):
+    """The ground a footprint model covers, as {(x, z)}.
+
+    Flattened rather than sliced at y=0, so any model can serve as a footprint —
+    pointing this at a finished house gives you its outline to rebuild on.
+    """
+    return {(x, z) for x, _, z in voxel.load(path)}
+
+
+def list_models(out_dir=OUT_DIR):
+    """Footprint models on disk, commonest first, each with its index entry.
+
+    Falls back to reading the models themselves when there is no index.json, so
+    a hand-made or hand-edited footprint in the directory is still offered.
+    """
+    try:
+        names = sorted(f for f in os.listdir(out_dir)
+                       if f.startswith('footprint-') and f.endswith('.json'))
+    except OSError:
+        return []
+
+    meta = {}
+    try:
+        with open(os.path.join(out_dir, 'index.json')) as fh:
+            index = json.load(fh)
+        for fam in index.get('families', []):
+            for s in fam.get('sizes', []):
+                meta[s['file']] = {'buildings': s.get('buildings'),
+                                   'family': fam.get('rank'),
+                                   'metres': s.get('metres')}
+    except (OSError, ValueError, KeyError):
+        pass
+
+    out = []
+    for name in names:
+        path = os.path.join(out_dir, name)
+        try:
+            cells = load_cells(path)
+        except (OSError, ValueError, KeyError):
+            continue
+        if not cells:
+            continue
+        info = meta.get(name, {})
+        xs = [c[0] for c in cells]
+        zs = [c[1] for c in cells]
+        out.append({
+            'file': path, 'name': name, 'cells': cells,
+            'w': max(xs) - min(xs) + 1, 'h': max(zs) - min(zs) + 1,
+            'buildings': info.get('buildings'), 'family': info.get('family'),
+        })
+    # the index's own order is by how common the shape is; keep it
+    out.sort(key=lambda e: (e['buildings'] is None, -(e['buildings'] or 0)))
+    return out
 
 
 def write_sheet(models, path, cell, cols=6, scale=6, pad=12):

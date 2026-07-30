@@ -255,7 +255,11 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   is the bridge to the city: `scale` is the cell size in metres.
 - **voxity/editor/** — the editing half. `app.py` owns the loop and the layout, `pick.py`
   is the DDA ray march, `render.py` the two GL programs, `io.py` the file dialog and the
-  OBJ/PNG exports.
+  OBJ/PNG exports, `choose.py` the modal footprint picker (its own loop, like
+  startscreen.py). The footprint a model is built on is `{(x, z)}` on `Editor`, enforced
+  in one place — `Editor.allowed` — and stored in the model's JSON under `footprint`, so
+  `voxel.save` takes it and `voxel.load_footprint` reads it back. `voxel.load` is
+  unchanged and still returns only voxels, which is why every other caller was untouched.
 - **voxity/startscreen.py** — the menu. Owns its own loop like mapview.py and returns
   `'play'` / `'editor'` / `'quit'`.
 - **voxity/mapview.py** — the region picker. Owns its own event loop, returns a lon/lat
