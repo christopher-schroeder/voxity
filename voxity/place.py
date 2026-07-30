@@ -27,16 +27,12 @@ Three things make it cheap enough to run over a whole square:
   has to agree with the cache the first one wrote.
 
 Placed houses carry `MAT_VOXEL`, so the city lights them with its own sun and
-they show the same per-cell mosaic as the editor. One caveat, and it is visible
-if you look for it: that mosaic is a hash of the **world** cell (see
-`shaders.voxel_value_glsl`), so on a building that does not run north-south the
-lattice no longer lines up with the house's own voxels. It still reads as voxel
-noise, because it is; it is simply not the same noise the editor drew. Making it
-follow the rotation would mean handing the shader a per-building frame, and the
-vertex layout has no room for one. The alternative — baking the value into the
-vertex colour — costs the greedy mesher entirely, since neighbouring cells hash
-differently and nothing would merge: a few hundred triangles a house becomes a
-few thousand.
+they show the same per-cell mosaic as the editor — the *same* mosaic, not merely
+a similar one. `voxel.mesh_vertices` writes each vertex's position in the
+model's own cells into the vertex (see mesh.py) and the shader hashes that, so
+the pattern turns and moves with the house. It used to be derived from world
+position, which left a house on a street that does not run north-south wearing a
+lattice at an angle to its own voxels, most obviously across its roof.
 """
 
 import hashlib

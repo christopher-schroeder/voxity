@@ -33,7 +33,9 @@ pillars are the shapes you actually build, and none of them is a cube — with a
 `- n +` stepper per dimension under the palette. You pick the **hue**; the
 brightness is not yours to choose — it is a hash of the cell's position, so
 neighbouring voxels vary slightly and a given cell always looks the same. That
-is what gives a flat wall its mosaic.
+is what gives a flat wall its mosaic. The position is the cell's place in the
+*model*, not in the world, so the grain turns with a house when the city stands
+it on a street that runs at an angle.
 
 | | |
 |---|---|

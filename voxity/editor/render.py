@@ -100,7 +100,6 @@ class EditorRenderer:
         self.voxel_prog['u_light'].value = tuple(float(v) for v in voxel.LIGHT)
         self.voxel_prog['u_ambient'].value = voxel.AMBIENT
         self.voxel_prog['u_diffuse'].value = voxel.DIFFUSE
-        self.voxel_prog['u_voxel_cell'].value = 1.0
 
         self.line_prog = ctx.program(vertex_shader=shaders.LINE_VS,
                                      fragment_shader=shaders.LINE_FS)
@@ -145,7 +144,7 @@ class EditorRenderer:
             self.line_prog, [(self.foot_vbo, '3f 3f', 'in_pos', 'in_col')])
 
     def upload(self, verts):
-        """Replace the voxel mesh. `verts` is the (N, 10) shared layout."""
+        """Replace the voxel mesh. `verts` is the (N, 13) shared layout."""
         if self.vao is not None:
             self.vao.release()
             self.wire_vao.release()
@@ -158,11 +157,12 @@ class EditorRenderer:
         # the material slot is skipped: this program knows everything here is voxel
         self.vao = self.ctx.vertex_array(
             self.voxel_prog,
-            [(self.vbo, '3f 3f 3f 4x', 'in_pos', 'in_norm', 'in_col')])
+            [(self.vbo, '3f 3f 3f 4x 3f', 'in_pos', 'in_norm', 'in_col',
+              'in_cell')])
         # a second view of the very same buffer, position only, so the overlay
         # is the triangles that were actually drawn and not a copy of them
         self.wire_vao = self.ctx.vertex_array(
-            self.wire_prog, [(self.vbo, '3f 28x', 'in_pos')])
+            self.wire_prog, [(self.vbo, '3f 40x', 'in_pos')])
 
     def draw(self, camera, aspect, show_grid=True, boxes=(), show_wire=False):
         ctx = self.ctx

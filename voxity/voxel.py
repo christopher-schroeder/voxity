@@ -15,10 +15,12 @@ concatenated straight into a city's vertex buffer.
 
 Colour is a (hue, value) pair at fixed saturation, and the *value* is not
 stored: it is a hash of the cell position, so neighbouring cells differ
-slightly and a given cell always looks the same. That hash is evaluated in the
-shader rather than baked into vertices (see `shaders.voxel_value_glsl`), which
-is what lets greedy meshing merge a whole wall into one quad and still draw one
-brightness square per voxel.
+slightly and a given cell always looks the same. The vertex carries the cell
+*position* and the shader does the hashing (see `shaders.voxel_value_glsl`),
+which is what lets greedy meshing merge a whole wall into one quad and still
+draw one brightness square per voxel — and, because the position is the model's
+own, lets the grain turn with the model when a city stands it on an angled
+street.
 """
 
 import colorsys
@@ -37,10 +39,11 @@ DEFAULT_MODEL = os.path.join(MODEL_DIR, 'model.json')
 #
 # The edge of one cell in metres, and the one place it is decided. A model is
 # stored in cells and knows nothing about metres; this is what the survey
-# rasterises at, what a house is proportioned to, what `place.py` meshes at, and
-# what `Renderer.voxel_cell` must be set to. They all have to agree — the
-# shader's mosaic is a hash of the *world* cell, so a model meshed at one size
-# in a scene set to another stops lining up with its own geometry.
+# rasterises at, what a house is proportioned to, and what `place.py` meshes at.
+# The shader no longer needs to be told (it hashes the model-cell position the
+# mesher writes into each vertex), so models at different cell sizes can share
+# one buffer — but the survey, the houses and the placement still have to agree,
+# or a plan will not fit the building it was measured from.
 #
 # 0.25 m is chosen from the look: it puts a window at about four cells across
 # and a storey at twelve, which is the density the voxel city builders have.
@@ -69,15 +72,41 @@ CENTRE_VALUE = (N_VALS - 1) / 2
 VALUE_POOL = [CENTRE_VALUE + _LEVEL_STEP * (k - (_N_LEVELS - 1) / 2)
               for k in range(_N_LEVELS)]              # 13.75 .. 17.25
 
-# the hash's per-axis primes, shared verbatim with the GLSL version
-HASH_PRIMES = (73856093, 19349663, 83492791)
+# The per-axis primes the three coordinates are combined with, and then a
+# finalising avalanche, all shared verbatim with the GLSL version.
+#
+# The avalanche is the part that matters and the part that was missing. The
+# original hash was `(x*p1) ^ (y*p2) ^ (z*p3)` read from its **low** bits, and
+# multiplying by a constant leaves the low bits of a product depending only on
+# the low bits of that constant: with these primes it collapsed to
+# `(5x ^ 7y ^ 7z) & 7`, a lattice of period 8 in every axis that reads on a wall
+# as regular stripes rather than as noise. Mixing the high bits back down before
+# taking the low three is what makes it look like a hash.
+HASH_PRIMES = (0x9E3779B1, 0x85EBCA77, 0xC2B2AE3D)
+HASH_MIX = ((16, 0x7FEB352D), (15, 0x846CA68B), (16, None))
+
+_U32 = 0xFFFFFFFF
+
+
+def cell_hash(x, y, z):
+    """A well-mixed 32-bit hash of a cell position.
+
+    Masked to 32 bits at every step so it agrees with GLSL's `uint`, which wraps
+    by definition — including for negative coordinates, where the mask is the
+    same two's-complement reinterpretation `uint(int)` performs.
+    """
+    px, py, pz = HASH_PRIMES
+    h = (((x & _U32) * px) ^ ((y & _U32) * py) ^ ((z & _U32) * pz)) & _U32
+    for shift, mul in HASH_MIX:
+        h ^= h >> shift
+        if mul is not None:
+            h = (h * mul) & _U32
+    return h
 
 
 def value_for_cell(x, y, z):
     """Deterministic value index (from VALUE_POOL) for a voxel position."""
-    px, py, pz = HASH_PRIMES
-    n = (int(x) * px) ^ (int(y) * py) ^ (int(z) * pz)
-    return VALUE_POOL[n % len(VALUE_POOL)]
+    return VALUE_POOL[cell_hash(int(x), int(y), int(z)) % len(VALUE_POOL)]
 
 
 # Unit-cube faces: (outward normal, 4 corner offsets in CCW order seen from
@@ -216,6 +245,10 @@ def mesh_vertices(quads, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL,
     to the compass. It must be a *rotation*: normals go through it unchanged in
     length, and a reflection would turn every face inside out under back-face
     culling. Mirror a model by mirroring its voxels instead.
+
+    The **untransformed** corners go into the cell slot, nudged half a cell in
+    along the face normal, so the mosaic is hashed in the model's own frame and
+    turns with it however the model is placed.
     """
     mb = MeshBuilder()
     if not quads:
@@ -223,15 +256,18 @@ def mesh_vertices(quads, scale=1.0, offset=(0.0, 0.0, 0.0), mat=MAT_VOXEL,
     off = np.asarray(offset, dtype=np.float64)
     rot = None if basis is None else np.asarray(basis, dtype=np.float64).T
     for normal, hue, corners in quads:
-        c = np.asarray(corners, dtype=np.float64) * scale
+        local = np.asarray(corners, dtype=np.float64)
         n = np.asarray(normal, dtype=np.float64)
+        cell = local - 0.5 * n
+        c = local * scale
         if rot is not None:
             c = c @ rot
             n = n @ rot
         c = c + off
-        tris = np.array([c[0], c[1], c[2], c[0], c[2], c[3]], dtype=np.float32)
-        mb.add(tris, n.astype(np.float32),
-               np.asarray(color_rgb(hue, N_VALS - 1), dtype=np.float32), mat)
+        idx = [0, 1, 2, 0, 2, 3]
+        mb.add(np.array(c[idx], dtype=np.float32), n.astype(np.float32),
+               np.asarray(color_rgb(hue, N_VALS - 1), dtype=np.float32), mat,
+               cell=np.array(cell[idx], dtype=np.float32))
     return mb.pack()
 
 

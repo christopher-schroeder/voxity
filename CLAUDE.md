@@ -210,11 +210,17 @@ under the very transform you are trying to catch.
 
 The invariant worth testing on the voxel side is that the shader's mosaic agrees with
 `voxel.value_for_cell` on the CPU. Mesh a flat single-hue wall — it greedy-merges to one
-quad, so every brightness square on it comes from the shader alone — then sample the
-middle of each cell and compare with `color_rgb(hue, value_for_cell(cell))` times
-`face_brightness(normal)`. Do it once at large negative coordinates too: that is where
-GLSL's 32-bit multiply wraps and Python's does not, and the bitmask is what makes them
-agree anyway.
+quad, so every brightness square on it comes from the shader alone — render it face-on
+through an **orthographic** projection so one cell is a known block of pixels, then
+compare the middle of each cell with `color_rgb(hue, value_for_cell(cell))` times
+`face_brightness(normal)`. Do it once at large negative coordinates too, for the 32-bit
+wrap.
+
+Two things will make that test lie. Enable **depth test and back-face culling**: without
+them the wall's far face wins the pixel, its face brightness is half the near one's, and
+every cell reads as the darkest level — which looks exactly like a hash mismatch. And
+remember `value_for_cell` returns a *value index* to feed `color_rgb`, not a multiplier;
+the shader's table is that index already divided by `N_VALS - 1`.
 
 ## Pipeline
 
@@ -413,25 +419,30 @@ which eyeballing the map does not.
 Every `Scene` array is `(x, z)` 2D; build.py lifts it to `(x, y, z)`. Camera yaw 0 looks
 north. Get this backwards and the city mirrors.
 
-**Vertex layout.** `3f 3f 3f 1f` = position, normal, colour, material — declared in
-mesh.py, consumed by `Renderer.scene_vao`, read by `SCENE_VS`. `MAT_MATTE` 0,
+**Vertex layout.** `3f 3f 3f 1f 3f` = position, normal, colour, material, **cell** —
+declared in mesh.py, consumed by `Renderer.scene_vao`, read by `SCENE_VS`. `MAT_MATTE` 0,
 `MAT_WATER` 1 (ripple normal + specular), `MAT_VOXEL` 2 (the per-cell mosaic).
 `SCENE_FS` switches on `v_mat` **highest first**; a material with no branch falls through
 to matte, and a new one has to keep its distance from the others by more than 0.5.
-`u_voxel_cell` is one uniform for the whole scene, so every voxel model in a city has to
-be meshed at the same `scale` that `Renderer.voxel_cell` is set to, or the mosaic stops
-lining up with the geometry.
 
-**The mosaic does not follow a rotated model, and that is a deliberate trade.**
-`voxel_value` hashes the **world** cell, so a house `place.py` stands on a building that
-does not run north-south gets a lattice at an angle to its own voxels. It still reads as
-voxel noise — it is the same hash at the same scale — but it is not the noise the editor
-drew for that model. Fixing it means handing the shader a per-building frame, and the
-vertex layout has no room for one. The obvious alternative, baking the value into the
-vertex colour, is what costs: neighbouring cells hash differently, so `_greedy_plane`
-would merge almost nothing and a house goes from a few hundred triangles to a few
-thousand — a 1000x difference in the buffer over a square. If you ever do add a frame,
-`voxel.mesh_vertices(basis=...)` already has the rotation.
+**`cell` is the vertex's position in its own model's cells, and that is what makes the
+mosaic turn with the model.** It used to be derived from world position, and a house
+`place.py` stood on a building that did not run north-south then wore a lattice at an
+angle to its own voxels — worst on the roof, where nothing else gave the orientation
+away. Three cheaper-looking fixes do not work: the material slot cannot carry a rotation
+*and* a phase; deriving a tangent frame from the normal is fine for walls and ambiguous
+for exactly the horizontal faces that showed the problem; and baking the value into the
+vertex colour destroys greedy merging, since neighbouring cells hash differently and a
+house goes from a few hundred triangles to a few thousand. Three floats a vertex is
+about 3 MB over a 1200 m square, which is nothing.
+
+`mesh.py` nudges it **half a cell inside the surface** so the shader needs neither the
+face normal nor a cell size: the offset is perpendicular to the quad, so it changes
+nothing in the plane, and a fragment exactly on a face still floors into the cell that
+owns it. That is also why there is no longer a `u_voxel_cell` uniform and no rule about
+meshing every model at one scale — models at different cell sizes can now coexist in one
+buffer. `MeshBuilder.add` takes `cell=None` for everything that is not `MAT_VOXEL`, and
+its re-winding permutes the cell rows along with the positions.
 
 `basis` must be a **rotation**, never a reflection: normals go through it unchanged and a
 reflection turns every face inside out under back-face culling. `place.py` mirrors a
@@ -512,14 +523,19 @@ each is easy to break:
 * `hsv_to_rgb` is linear in V at fixed H and S, so the CPU hands over the *full-value*
   colour and the shader multiplies the per-cell factor in. Change the palette to
   something non-linear in V and the shader stops matching per-voxel shading.
-* The shader recovers the cell from the fragment's **world position**, stepping half a
-  cell back along the normal first so a fragment exactly on a face floors into the cell
-  that owns it. This is what makes the mosaic survive greedy meshing: one merged quad
-  covering a whole wall still draws one brightness square per voxel.
+* The shader reads the cell straight off the vertex (see the layout above), which is
+  what makes the mosaic survive greedy meshing: one merged quad covering a whole wall
+  still draws one brightness square per voxel.
 * `& 7` stands in for `% len(VALUE_POOL)`, which is only valid while that length is a
-  power of two — `voxel_value_glsl` raises if it isn't. It is also why the two agree at
-  large coordinates, where GLSL's 32-bit multiply wraps and Python's does not: wrapping
-  mod 2³² preserves the low three bits.
+  power of two — `voxel_value_glsl` raises if it isn't.
+* **The hash needs a real avalanche, and taking low bits off a multiply is not one.**
+  This was `(x*p1) ^ (y*p2) ^ (z*p3)` read from its bottom three bits, and the low bits
+  of a product depend only on the low bits of the constant: with those primes it
+  collapsed to `(5x ^ 7y ^ 7z) & 7`, a lattice of period 8 in every axis that reads on a
+  wall as stripes rather than as grain. `HASH_MIX` folds the high bits back down first.
+  GLSL does it in `uint`, where the wrap is defined (it is undefined for signed), and
+  `uint(int)` is exactly the reinterpretation Python's `& 0xFFFFFFFF` performs, so
+  negative cells agree too.
 
 **Determinism.** Unmapped heights, colours, roof shapes and per-building tint all come
 from `_hash01`/`_jitter` seeded on the OSM id with a per-purpose salt — so the same box

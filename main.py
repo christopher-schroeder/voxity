@@ -147,7 +147,7 @@ def resolve_bbox(args):
     return square_bbox(lon, lat, args.size)
 
 
-MESH_VERSION = 3
+MESH_VERSION = 4
 
 
 def download_pbf(url, path):

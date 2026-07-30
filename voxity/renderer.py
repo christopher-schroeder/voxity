@@ -13,7 +13,7 @@ import math
 import moderngl
 import numpy as np
 
-from . import shaders, voxel
+from . import shaders
 from .build import tree_mesh
 from .camera import look_at, ortho, to_gl
 
@@ -120,13 +120,6 @@ class Renderer:
         self.shadows = True
         self.show_trees = True
         self.time = 0.0
-        # Edge length of one voxel, for anything in the buffer carrying
-        # MAT_VOXEL. One uniform for the whole scene, so every voxel model in a
-        # city has to be meshed at the same cell size — which is why it comes
-        # from voxel.CELL_M rather than being a number here. Set it to anything
-        # else and the mosaic stops lining up with the geometry.
-        self.voxel_cell = voxel.CELL_M
-
         self.scene_prog = ctx.program(vertex_shader=shaders.SCENE_VS,
                                       fragment_shader=shaders.SCENE_FS)
         self.depth_prog = ctx.program(vertex_shader=shaders.DEPTH_VS,
@@ -138,9 +131,10 @@ class Renderer:
         self.n_verts = len(verts)
         self.scene_vao = ctx.vertex_array(
             self.scene_prog,
-            [(self.vbo, '3f 3f 3f 1f', 'in_pos', 'in_norm', 'in_col', 'in_mat')])
+            [(self.vbo, '3f 3f 3f 1f 3f',
+              'in_pos', 'in_norm', 'in_col', 'in_mat', 'in_cell')])
         self.scene_depth_vao = ctx.vertex_array(
-            self.depth_prog, [(self.vbo, '3f 28x', 'in_pos')])
+            self.depth_prog, [(self.vbo, '3f 40x', 'in_pos')])
 
         # one fullscreen triangle, shared by the sky and both post passes: three
         # vertices rather than a quad's six, so there is no diagonal seam
@@ -289,7 +283,6 @@ class Renderer:
         _set(prog, 'u_shadow', 0)
         _set(prog, 'u_shadow_texel', (1.0 / SHADOW_SIZE, 1.0 / SHADOW_SIZE))
         _set(prog, 'u_light_vp', to_gl(self.light_vp))
-        _set(prog, 'u_voxel_cell', self.voxel_cell)
 
     # -- passes --------------------------------------------------------------
 

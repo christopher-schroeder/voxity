@@ -11,31 +11,40 @@ def voxel_value_glsl():
     This is the editor's look in one function, and the reason it is generated
     rather than written out: `value_for_cell` and this shader must agree
     exactly, or a merged quad stops matching the voxels under it. Including it
-    is what gives a shader the mosaic; `u_voxel_cell` says how big a cell is in
-    world units, so the same code serves 1 m editor cubes and half-metre bricks
-    on a city building.
+    is what gives a shader the mosaic. It hashes the model-cell position the
+    mesher put in the vertex (see mesh.py), so it needs no cell size and no
+    normal, and one program serves any model at any scale.
     """
     n = len(voxel.VALUE_POOL)
-    # `& mask` reproduces Python's `n % len(VALUE_POOL)` only for a power-of-two
-    # length; the low bits of a two's-complement int are the floored modulo, so
-    # it agrees even for negative coordinates and even when GLSL's 32-bit
-    # multiply wraps where Python's does not.
+    # `& mask` reproduces Python's `% len(VALUE_POOL)` only for a power-of-two
+    # length.
     if n & (n - 1):
         raise ValueError('VALUE_POOL length must be a power of two')
     mult = ', '.join('%.8f' % (v / (voxel.N_VALS - 1)) for v in voxel.VALUE_POOL)
     px, py, pz = voxel.HASH_PRIMES
+    mix = '\n'.join(
+        f'    h ^= h >> {shift}u;' + (f'\n    h *= {mul:#010x}u;' if mul else '')
+        for shift, mul in voxel.HASH_MIX)
     return f"""
-uniform float u_voxel_cell;    // edge length of one voxel in world units
 const float VOXEL_MULT[{n}] = float[{n}]({mult});
 
-float voxel_value(vec3 world, vec3 normal) {{
-    // Step half a cell back along the normal first, so a fragment exactly on a
-    // face floors into the cell that owns it rather than its neighbour.
-    vec3 cell = floor((world - 0.5 * normal * u_voxel_cell) / u_voxel_cell);
-    int X = int(cell.x) * {px};
-    int Y = int(cell.y) * {py};
-    int Z = int(cell.z) * {pz};
-    return VOXEL_MULT[(X ^ Y ^ Z) & {n - 1}];
+// `uint` rather than `int`: the wrap this depends on is defined for unsigned
+// and undefined for signed, and `uint(int)` is the same two's-complement
+// reinterpretation Python's `& 0xFFFFFFFF` performs, so negative cells agree.
+uint cell_hash(ivec3 c) {{
+    uint h = uint(c.x) * {px:#010x}u
+           ^ uint(c.y) * {py:#010x}u
+           ^ uint(c.z) * {pz:#010x}u;
+{mix}
+    return h;
+}}
+
+// `cell` is the fragment's position in the **model's own cells**, already
+// nudged half a cell inside the surface by the mesher (see mesh.py), so this
+// needs neither the face normal nor a cell size — and the pattern turns with
+// the model instead of staying nailed to the world axes.
+float voxel_value(vec3 cell) {{
+    return VOXEL_MULT[cell_hash(ivec3(floor(cell))) & {n - 1}u];
 }}
 """
 
@@ -249,18 +258,21 @@ in vec3 in_pos;
 in vec3 in_norm;
 in vec3 in_col;
 in float in_mat;
+in vec3 in_cell;
 uniform mat4 u_vp;
 uniform mat4 u_light_vp;
 out vec3 v_world;
 out vec3 v_norm;
 out vec3 v_col;
 out float v_mat;
+out vec3 v_cell;
 out vec4 v_light;
 void main() {
     v_world = in_pos;
     v_norm = in_norm;
     v_col = in_col;
     v_mat = in_mat;
+    v_cell = in_cell;
     v_light = u_light_vp * vec4(in_pos, 1.0);
     gl_Position = u_vp * vec4(in_pos, 1.0);
 }
@@ -271,6 +283,7 @@ in vec3 v_world;
 in vec3 v_norm;
 in vec3 v_col;
 in float v_mat;
+in vec3 v_cell;
 in vec4 v_light;
 out vec4 f_color;
 """ + COMMON_LIGHTING + voxel_value_glsl() + """
@@ -285,7 +298,7 @@ void main() {
         // multiplied into the albedo *before* the sRGB decode below, because
         // that is where the editor applies it (VOXEL_FS never decodes). Do it
         // after and the same hash comes out visibly flatter here than there.
-        albedo *= voxel_value(v_world, n);
+        albedo *= voxel_value(v_cell);
     } else if (v_mat > 0.5) {                // water
         vec2 w = v_world.xz;
         float t = u_time * 0.35;
@@ -327,22 +340,23 @@ VOXEL_VS = """#version 330 core
 in vec3 in_pos;
 in vec3 in_norm;
 in vec3 in_col;
+in vec3 in_cell;
 uniform mat4 u_vp;
-out vec3 v_world;
 out vec3 v_norm;
 out vec3 v_col;
+out vec3 v_cell;
 void main() {
-    v_world = in_pos;
     v_norm = in_norm;
     v_col = in_col;
+    v_cell = in_cell;
     gl_Position = u_vp * vec4(in_pos, 1.0);
 }
 """
 
 VOXEL_FS = """#version 330 core
-in vec3 v_world;
 in vec3 v_norm;
 in vec3 v_col;
+in vec3 v_cell;
 out vec4 f_color;
 uniform vec3 u_light;
 uniform float u_ambient;
@@ -351,7 +365,7 @@ uniform float u_diffuse;
 void main() {
     vec3 n = normalize(v_norm);
     float br = u_ambient + u_diffuse * max(0.0, dot(n, u_light));
-    f_color = vec4(v_col * br * voxel_value(v_world, n), 1.0);
+    f_color = vec4(v_col * br * voxel_value(v_cell), 1.0);
 }
 """
 

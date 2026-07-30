@@ -18,9 +18,10 @@ to somebody who has to model each one. So grouping happens twice:
   different family; so is a squarer rectangle.
 * A family's **sizes** are the concrete cell dimensions its members really had,
   and each family contributes its commonest few as separate models. Size cannot
-  be normalised away in the output: `Renderer.voxel_cell` is one uniform for the
-  whole scene, so a voxel model can never be rescaled when it is placed. Giving
-  size its own axis is what stops it competing with shape for output slots.
+  be normalised away in the output: a house is built cell by cell on a specific
+  plan, and stretching it to fit a different one would stretch its windows with
+  it. Giving size its own axis is what stops it competing with shape for output
+  slots.
 
 Rotation is removed before either step by rotating each footprint onto its own
 minimum-area rectangle (`geo.oriented_box`), and quarter turns and mirroring are
