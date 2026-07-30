@@ -41,7 +41,12 @@ the project installed **editable** into that same environment:
 ./env/bin/voxity --no-map                       # skip the picker, default square
 ./env/bin/voxity --editor                       # straight into the voxel editor
 ./env/bin/voxity --list-places                  # 14 Hamburg presets in main.py
+./env/bin/voxity --build-footprints             # survey footprint shapes, then exit
 ```
+
+`--build-map` and `--build-footprints` are checked before anything else in `main.main`
+and both `return` rather than falling through, so neither opens a window; they are the
+two offline tools.
 
 **Naming a tool suppresses everything before it.** `--place`/`--center`/`--bbox`,
 `--no-map` and `--screenshot` (which has nobody to click) go straight to the direct city
@@ -105,7 +110,7 @@ module would need the same treatment.
 
 ### Smoke tests
 
-There are no unit tests. Three ways to verify a change without a human at the keyboard,
+There are no unit tests. Nine ways to verify a change without a human at the keyboard,
 cheapest first:
 
 ```
@@ -132,6 +137,15 @@ square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 
 # 7. the editor in the real window, quits by itself
 ./env/bin/voxity --editor --frames 3
+
+# 8. the footprint survey — no GL at all, and cached after the first run
+#    (cold: ~4m40s over Hamburg, all of it the osmium read plus rasterising;
+#     warm: 2s, of which grouping is 1.4s — so iterate on thresholds freely)
+./env/bin/voxity --build-footprints --footprint-count 6 --footprint-sizes 2
+
+# 9. a footprint opened as a model, which is the point of (8)
+./env/bin/voxity --editor --model models/footprints/footprint-00-0-12x9.json \
+    --screenshot fp.png
 ```
 
 (1) works because `main.run_windowed` and `main.render_headless` import moderngl and
@@ -164,8 +178,8 @@ agree anyway.
 
 ## Pipeline
 
-There are **three** pipelines. Two run over the `.osm.pbf` and share only tags.py and
-geo.py; the third has nothing to do with OSM at all and meets the first one at the
+There are **four** pipelines. Three run over the `.osm.pbf` and share only tags.py and
+geo.py; the fourth has nothing to do with OSM at all and meets the first one at the
 vertex buffer:
 
 ```
@@ -173,7 +187,15 @@ play:   .osm.pbf → extract.py → Scene → build.py ─┐
 map:    .osm.pbf → overview.py ────────────────── │ → PNG → mapview.py → GL
 voxel:  models/*.json → voxel.py ─────────────────┴→ (verts, trees) → renderer.py → GL
                                  └→ editor/render.py → GL   (the editor's own view)
+shapes: .osm.pbf → footprints.py → models/footprints/*.json ─┘  (via the editor,
+                                                                 by hand)
 ```
+
+The shapes pipeline is the only one with a **human in the middle**, and it is offline:
+`--build-footprints` reduces every building in the extract to a mask on the voxel grid
+and writes the commonest ones out as one-layer voxel models, which you then open in the
+editor and build upwards into a house. Nothing at runtime reads `models/footprints/`
+yet — placing those models back into a city is not written.
 
 The voxel pipeline exists twice on purpose. `voxel.mesh_vertices` emits the **shared
 layout from mesh.py**, so a model can go into a city's buffer and be lit by its sun and
@@ -199,8 +221,12 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   padded bbox) because materialising every ring of a city extract is the bottleneck.
   `KEYS` selects which **objects** survive the filter — it does not strip tags, so a
   kept object arrives with its full tag dict.
-- **voxity/geo.py** — `Projection` (equirectangular around the box centre) and the
-  Sutherland-Hodgman / Liang-Barsky clippers.
+- **voxity/geo.py** — `Projection` (equirectangular around the box centre), the
+  Sutherland-Hodgman / Liang-Barsky clippers, and the ring helpers `dedup_ring`,
+  `signed_area` and `oriented_box`. The last three were private to build.py until
+  footprints.py needed the same min-area rectangle; `oriented_box(ring, tol=0)` is
+  bit-for-bit the old behaviour, and only a non-zero `tol` engages the tie-break
+  described under "Retuning the footprint survey".
 - **voxity/mesh.py** — the vertex layout, `MeshBuilder`, and the `MAT_*` constants.
   Owned by neither producer, because build.py and voxel.py both feed it.
 - **voxity/build.py** — `build_scene` draws ground skirt → surfaces (by layer) → lines
@@ -218,6 +244,11 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   `data_bbox` histograms one node per object to find where the data actually *is*, then
   `bake` streams triangles through `_Batch`. Needs a live GL context, so it is imported
   lazily; `--build-map` bakes it headlessly through the same EGL path as `--screenshot`.
+- **voxity/footprints.py** — the offline shape survey. Streams the extract like
+  overview.py does (a mask per building, never a `Scene`), rotates each footprint onto
+  its own walls, rasterises it to the voxel grid, and groups the results. **No GL, no
+  pygame at import** — pygame is imported inside `write_sheet` only, which is why
+  main.py can import it at the top without breaking the GL-free smoke test.
 - **voxity/voxel.py** — the model (`{(x,y,z): hue}`), the palette, the per-cell value
   hash, exterior-cavity culling, the greedy mesher and JSON load/save. **No GL, no
   pygame** — that is what lets the city import it. `mesh_vertices(quads, scale, offset)`
@@ -270,7 +301,7 @@ lining up with the geometry. Trees are a separate program and buffer entirely
 sees foliage. Changing the layout means touching all three places,
 plus the `'3f 28x'` stride in `scene_depth_vao`.
 
-**Three cache versions, and they are not symmetric.** `extract.CACHE_VERSION` keys the
+**Four cache versions, and they are not symmetric.** `extract.CACHE_VERSION` keys the
 pickled `Scene`; `main.MESH_VERSION` keys the `.npz` mesh; `overview.MAP_VERSION` keys
 the baked map PNG, which is on its own branch entirely — it is *not* affected by
 `CACHE_VERSION`, because overview.py never builds a `Scene`. Bump `MAP_VERSION` when
@@ -284,6 +315,16 @@ extraction or `tags.py` changes what lands in a `Scene`; bump `MESH_VERSION` whe
 invalidates everything on its own. Forgetting a bump means a stale `cache/*.pkl` or
 `cache/*.npz` silently masks your edit — if a change "does nothing", suspect this first.
 Deleting `cache/` is always safe.
+
+`footprints.FOOTPRINT_VERSION` is the fourth, and it is on its own branch like the map's:
+it keys the pickled mask survey, and its cache key also folds in every constant that
+changes what a mask *is* (`CELL`, `SUPERSAMPLE`, the area and cell caps, `FRAME_TOL`,
+`NORM_LONG`) — so retuning those invalidates it without a version bump, while changing
+the grouping thresholds deliberately does *not*, because re-grouping a cached survey is
+the fast half. Bump `FOOTPRINT_VERSION` when the survey's *format* changes.
+Footprint output is not a cache: `models/footprints/` is checked-in-able work product
+and nothing deletes it, so a re-run overwrites `footprint-*.json` in place. Move a model
+you have started building **out** of that directory before re-running.
 
 `--no-trees` is applied *after* the mesh cache is read (`main.prepare` slices `trees` to
 length zero), so trees are always meshed and stored: changing tree geometry still needs a
@@ -352,7 +393,61 @@ invalidate `Renderer._shadow_key`.
    `--build-map --map-size 512`.
 
 Voxel models are **not** cached — they are meshed on load and on every edit — so none of
-the three versions covers them and none needs bumping for a voxel change.
+the four versions covers them and none needs bumping for a voxel change.
+
+## Retuning the footprint survey
+
+`--build-footprints` ranks on **two axes on purpose**, and collapsing them is the trap:
+rank on shape alone and the output is one rectangle where Hamburg has thirty sizes of
+them; rank on the voxel masks directly and all 24 slots are rectangles, because that is
+honestly what a city is mostly made of. So a *family* is the shape with its size
+normalised away, and each family emits its commonest few real sizes
+(`--footprint-sizes`). Both halves have to stay.
+
+`--footprint-count` counts **families**, not models, and that is load-bearing: Hamburg's
+first ten families are all rectangles at different proportions, so a cap on models never
+reaches the L-shapes — which is the exact failure the two axes exist to prevent. Output
+is up to `count * sizes` files. A run over Hamburg at the defaults gives rectangles for
+families 0–9 (`fill 1.00`, 70% of all footprints), then L-shapes with varying notches
+from 10 on, and a chamfered octagon around 22.
+
+`MIN_SHAPE_COUNT` is the other cost knob. Grouping is quadratic in candidates and 66k of
+Hamburg's 74k distinct shapes occur exactly *once*, so shapes below the threshold are
+skipped: they can neither form a top family nor reorder one. It costs coverage, not
+correctness — `families()` prints the percentage of footprints that survived, and
+`write` divides `share` by the full surveyed total rather than by the survivors so the
+index does not quietly inflate. Two prunes keep `align` off the critical path and both
+are *sound* (they can never discard a real match): a bounding box more than
+`ALIGN_MARGIN` different cannot match, and since overlap never exceeds the smaller area
+over the larger, neither can a shape whose filled-cell count is outside
+`[iou * n, n / iou]`. Dims alone are nearly useless as a filter here — almost every
+normalised shape is 20-by-something, so the filled-count band is what does the work.
+
+Three constants interact, and a change to one needs the other two re-checked — the way
+to do that is a sweep over a handful of synthetic shapes (rectangle, L, T, U, octagon)
+asking two questions at once: does one shape at several *scales* stay one family, and do
+the five shapes stay five families? Optimising either alone gives a wrong answer.
+
+* **`NORM_LONG`** has to resolve the thinnest feature worth keeping. At 12 a T-stem a
+  fifth of the width normalises to 2.4 cells, thresholds to 2 or 3 depending on where
+  the grid falls, and one real T lands in three families. 20 fixes it.
+* **`IOU_JOIN`** must stay *above* the overlap of two shapes you want kept apart. An
+  octagon and its bounding square overlap about 0.875, so dropping the threshold to 0.85
+  to be more forgiving silently merges every rounded building into "square".
+* **`FRAME_TOL`** exists because a shape with near-45-degree symmetry has several edge
+  directions bounding nearly the same area, and `oriented_box` picking the numerically
+  smallest makes the frame flip as the building rotates — an octagon then spreads over a
+  dozen families. Non-zero `tol` breaks the tie on how much perimeter runs along the
+  frame instead. It is **off by default** so build.py's gable fitter is untouched; if you
+  ever turn it on there, that is a `MESH_VERSION` bump.
+
+Two further things that look like bugs and are not. `normalise` must be given the
+footprint's **metric** span, not the mask's cell dimensions: cell dims are already
+rounded, so a 16 x 20 m L is 13 x 16 cells at one size and 22 x 28 at another, and those
+do not round to the same twentieths. And scale invariance holds at the *family* level
+only — a 9.6 m square on a 1 m grid genuinely loses a corner cell that a 12 m one keeps,
+so asserting equal canonical keys across scales will fail; assert that `families()` puts
+them together.
 
 ## Style
 

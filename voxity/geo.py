@@ -42,6 +42,74 @@ def bbox_overlaps(a, b):
     return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
 
 
+# --- rings ------------------------------------------------------------------
+
+def dedup_ring(ring):
+    """Drop the repeated closing vertex and any zero-length edges."""
+    if len(ring) > 1 and np.allclose(ring[0], ring[-1]):
+        ring = ring[:-1]
+    if len(ring) < 3:
+        return ring
+    keep = np.ones(len(ring), dtype=bool)
+    d = np.abs(np.diff(np.vstack([ring, ring[:1]]), axis=0)).max(axis=1)
+    keep[1:] = d[:-1] > 1e-6
+    return ring[keep]
+
+
+def signed_area(ring):
+    x, y = ring[:, 0], ring[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def oriented_box(ring, tol=0.0):
+    """Best-fit rectangle using the ring's own edge directions.
+
+    Returns ((lo, hi, u, v), fill_ratio) with `u` the long axis, or None for a
+    degenerate ring. `lo`/`hi` are extents in the (u, v) frame, so a point p
+    sits at (p @ u, p @ v). Cheap stand-in for rotating calipers: real
+    buildings are axis-aligned to one of their own walls.
+
+    `tol` accepts any frame within that fraction of the smallest area and picks
+    between them on how much of the perimeter runs along the frame. Several
+    directions can bound nearly the same area — an octagon has eight, a
+    near-square two — and taking the numerically smallest makes the frame jump
+    between them for two shapes that differ by one rasterised cell. Left at 0
+    the smallest area wins outright, which is what the roof fitter wants.
+    """
+    p = ring
+    e = np.roll(p, -1, axis=0) - p
+    el = np.linalg.norm(e, axis=1)
+    good = el > 1e-6
+    if not good.any():
+        return None
+    e, el = e[good], el[good]
+    dirs = e / el[:, None]
+    perp = np.stack([-dirs[:, 1], dirs[:, 0]], axis=1)
+    # candidate frames: each edge direction (duplicates cost little)
+    proj_x = p @ dirs.T                       # (N points, K dirs)
+    proj_y = p @ perp.T
+    w = proj_x.max(axis=0) - proj_x.min(axis=0)
+    h = proj_y.max(axis=0) - proj_y.min(axis=0)
+    areas = w * h
+    k = int(np.argmin(areas))
+    if areas[k] <= 1e-6:
+        return None
+    if tol > 0.0:
+        cand = np.flatnonzero(areas <= areas[k] * (1.0 + tol))
+        if len(cand) > 1:
+            # how much edge length lies along either axis of each candidate
+            # frame: 1 per unit of a wall parallel to it, 0.707 at 45 degrees
+            fit = np.maximum(np.abs(dirs @ dirs[cand].T),
+                             np.abs(dirs @ perp[cand].T))
+            k = int(cand[np.argmax((el[:, None] * fit).sum(axis=0))])
+    u = dirs[k]
+    v = np.array([-u[1], u[0]])
+    lo = np.array([proj_x[:, k].min(), proj_y[:, k].min()])
+    hi = np.array([proj_x[:, k].max(), proj_y[:, k].max()])
+    fill = abs(signed_area(ring)) / areas[k]
+    return (lo, hi, u, v), fill
+
+
 # --- clipping ---------------------------------------------------------------
 
 def clip_polygon(pts, bbox):

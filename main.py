@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from voxity import extract, voxel
+from voxity import extract, footprints, voxel
 from voxity.build import build_scene
 from voxity.camera import Camera
 from voxity.geo import square_bbox
@@ -92,6 +92,19 @@ def parse_args(argv=None):
                    help='long edge of the baked overview map in pixels')
     p.add_argument('--editor', action='store_true',
                    help='skip the start screen and open the voxel editor')
+    p.add_argument('--build-footprints', action='store_true',
+                   help='cluster the extract\'s building footprints into voxel '
+                        'models and exit')
+    p.add_argument('--footprint-cell', type=float, default=footprints.CELL,
+                   help='voxel cell size in metres for the footprints')
+    p.add_argument('--footprint-count', type=int, default=16,
+                   help='how many shape families to write')
+    p.add_argument('--footprint-sizes', type=int, default=2,
+                   help='how many real sizes of each shape to write')
+    p.add_argument('--footprint-iou', type=float, default=footprints.IOU_JOIN,
+                   help='overlap at which two footprints count as one shape')
+    p.add_argument('--footprint-dir', default='models/footprints',
+                   help='where the footprint models are written')
     p.add_argument('--model', default=voxel.DEFAULT_MODEL,
                    help=f'voxel model the editor opens (default {voxel.DEFAULT_MODEL})')
     return p.parse_args(argv)
@@ -235,6 +248,29 @@ def build_map(args):
     omap = overview.load_or_bake(ctx, args.pbf, **kw)
     print(f'overview map {omap.size[0]}x{omap.size[1]}  '
           f'{omap.metres_per_pixel:.1f} m/pixel')
+
+
+def build_footprints(args):
+    """Cluster the extract's building footprints into voxel models, then exit.
+
+    No GL at all — this is the pipeline that ends at the editor rather than at a
+    vertex buffer, so it runs anywhere the extract does.
+    """
+    ensure_pbf(args)
+    cell = args.footprint_cell
+    counts, areas, seen = footprints.collect(args.pbf, cell,
+                                             use_cache=not args.no_cache)
+    if not counts:
+        sys.exit('no usable building footprints in the extract')
+    fams = footprints.families(counts, areas, iou_join=args.footprint_iou)
+    footprints.write(fams, args.footprint_dir, cell,
+                     {'pbf': os.path.basename(args.pbf), 'buildings': seen,
+                      'footprints': sum(counts.values()),
+                      'distinct_shapes': len({k[0] for k in counts}),
+                      'iou_join': args.footprint_iou},
+                     count=args.footprint_count,
+                     per_family=args.footprint_sizes,
+                     total=sum(counts.values()))
 
 
 def render_headless(args, scene, verts, trees):
@@ -546,6 +582,9 @@ def main():
         return
     if args.build_map:
         build_map(args)
+        return
+    if args.build_footprints:
+        build_footprints(args)
         return
     if args.screenshot:
         if args.editor:

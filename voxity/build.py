@@ -9,6 +9,7 @@ instanced through their own program in renderer.py.
 import numpy as np
 from mapbox_earcut import triangulate_float32
 
+from .geo import dedup_ring, oriented_box, signed_area
 from .mesh import MAT_MATTE, MAT_WATER, MeshBuilder, orient_triangles
 
 
@@ -19,27 +20,15 @@ SURROUND_COLOUR = (0.27, 0.29, 0.26)
 UP = np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
 
-def _dedup_ring(ring):
-    """Drop the repeated closing vertex and any zero-length edges."""
-    if len(ring) > 1 and np.allclose(ring[0], ring[-1]):
-        ring = ring[:-1]
-    if len(ring) < 3:
-        return ring
-    keep = np.ones(len(ring), dtype=bool)
-    d = np.abs(np.diff(np.vstack([ring, ring[:1]]), axis=0)).max(axis=1)
-    keep[1:] = d[:-1] > 1e-6
-    return ring[keep]
-
-
 def _triangulate(outer, holes):
     """Fan out a polygon with holes; returns an (N,2) array of triangle corners."""
-    outer = _dedup_ring(outer)
+    outer = dedup_ring(outer)
     if len(outer) < 3:
         return None
     rings = [outer]
     ends = [len(outer)]
     for h in holes:
-        h = _dedup_ring(h)
+        h = dedup_ring(h)
         if len(h) >= 3:
             rings.append(h)
             ends.append(ends[-1] + len(h))
@@ -51,11 +40,6 @@ def _triangulate(outer, holes):
     if len(idx) == 0:
         return None
     return verts[idx]
-
-
-def _signed_area(ring):
-    x, y = ring[:, 0], ring[:, 1]
-    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 
 def _jitter(seed, amount=0.06):
@@ -131,38 +115,6 @@ def _add_ribbon(mb, pts, width, y, rgb, mat=MAT_MATTE):
 
 # --- buildings --------------------------------------------------------------
 
-def _oriented_box(ring):
-    """Best-fit rectangle using the ring's own edge directions.
-
-    Returns (corners, fill_ratio, axis) where corners are ordered along the
-    long axis first. Cheap stand-in for rotating calipers: real buildings are
-    axis-aligned to one of their own walls.
-    """
-    p = ring
-    e = np.roll(p, -1, axis=0) - p
-    el = np.linalg.norm(e, axis=1)
-    good = el > 1e-6
-    if not good.any():
-        return None
-    e, el = e[good], el[good]
-    dirs = e / el[:, None]
-    # candidate frames: each edge direction (duplicates cost little)
-    proj_x = p @ dirs.T                       # (N points, K dirs)
-    proj_y = p @ np.stack([-dirs[:, 1], dirs[:, 0]], axis=1).T
-    w = proj_x.max(axis=0) - proj_x.min(axis=0)
-    h = proj_y.max(axis=0) - proj_y.min(axis=0)
-    areas = w * h
-    k = int(np.argmin(areas))
-    if areas[k] <= 1e-6:
-        return None
-    u = dirs[k]
-    v = np.array([-u[1], u[0]])
-    lo = np.array([proj_x[:, k].min(), proj_y[:, k].min()])
-    hi = np.array([proj_x[:, k].max(), proj_y[:, k].max()])
-    fill = abs(_signed_area(ring)) / areas[k]
-    return (lo, hi, u, v), fill
-
-
 def _gable_roof(mb, box, top, height, colour):
     """Two slanted planes plus triangular gable ends, on the long axis."""
     (lo, hi, u, v) = box
@@ -234,9 +186,9 @@ def _add_building(mb, b):
     _flat(mb, cap, top, roof)
 
     if b.get('shape') == 'gabled' and not b['holes'] and top - base < 26.0:
-        ring = _dedup_ring(np.asarray(outer, dtype=np.float64))
+        ring = dedup_ring(np.asarray(outer, dtype=np.float64))
         if 3 <= len(ring) <= 10:
-            fit = _oriented_box(ring)
+            fit = oriented_box(ring)
             if fit is not None:
                 box, fill = fit
                 size = box[1] - box[0]
@@ -245,10 +197,10 @@ def _add_building(mb, b):
                     _gable_roof(mb, box, top, min(short * 0.35, 4.5), roof)
 
     for ring, is_hole in [(outer, False)] + [(h, True) for h in b['holes']]:
-        ring = _dedup_ring(np.asarray(ring, dtype=np.float64))
+        ring = dedup_ring(np.asarray(ring, dtype=np.float64))
         if len(ring) < 3:
             continue
-        area = _signed_area(ring)
+        area = signed_area(ring)
         if abs(area) < 1e-3:
             continue
         # Normalise the winding (outer rings anticlockwise, holes clockwise)

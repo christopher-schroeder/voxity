@@ -68,6 +68,53 @@ The same mesher feeds the city: `voxel.mesh_vertices` emits the exact vertex
 layout `build.py` does, so a model concatenates onto a city's vertex buffer and
 comes back lit by the city's sun and shadow map, still wearing its mosaic.
 
+## Footprint shapes
+
+A city repeats itself. `--build-footprints` reads every building in the extract,
+reduces its footprint to a mask on the **voxel** grid, and writes the commonest
+shapes out as one-layer voxel models — floor plans, ready to open in the editor
+and build upwards into a house.
+
+```
+./env/bin/voxity --build-footprints
+./env/bin/voxity --editor --model models/footprints/footprint-00-0-12x9.json
+```
+
+Each footprint is rotated onto its own walls first, so a house is one shape
+however its street runs, and quarter turns and mirroring are folded together —
+placing a model turned costs nothing. What is *not* folded away is size: a voxel
+model is meshed at one cell size for the whole scene, so it can never be
+rescaled when it is placed, and 8 × 12 m is a different footprint from
+16 × 24 m.
+
+That makes size an axis of its own, and the output is ranked on both. A
+**family** is a shape with its size normalised away — every 2:1 rectangle is one
+family, an L is another — and each family then writes out the few real sizes it
+actually occurs at. Rank on shape alone and you get one rectangle where the city
+has thirty; rank on size alone and all of it is rectangles, because that is what
+a city is mostly made of.
+
+Over Hamburg's 355k buildings that comes out as: ten families of plain rectangle
+at proportions from 4:3 to 5:1, which between them are 70% of every building in
+the city, and then L-shapes of varying notch, and a chamfered octagon. So
+`--footprint-count` counts *shapes*, and you need to ask for more than ten of
+them before anything stops being a box.
+
+Shapes do not have to match exactly to be grouped: footprints within 88% overlap
+of a family join it, and what gets written is the shape a **majority of the
+family's members agree on** cell by cell, not any single building. So a ragged
+survey of near-identical semi-detached houses comes out as one clean plan.
+
+Output lands in `models/footprints/`: a model per shape and size, an
+`index.json` recording how many buildings each stands for, and a `sheet.png`
+contact sheet to look at them all at once. It is work product, not a cache —
+nothing deletes it, and a re-run overwrites the models in place, so move
+anything you have started building out of there first.
+
+The first run reads all 355k buildings and takes about **4 to 5 minutes**. The
+survey is cached after that, so retuning how shapes are grouped re-runs in two
+seconds — which is the point of caching the masks rather than the result.
+
 ## The map
 
 The overview is baked once per extract and cached in `cache/`, because it means
@@ -165,6 +212,12 @@ built-in `--place` presets are all Hamburg.
 --no-map          skip the picker and use the default square
 --editor          skip the menu and open the voxel editor
 --model FILE      model the editor opens   (default models/model.json)
+--build-footprints     survey the extract's footprint shapes and exit
+--footprint-cell M     voxel cell size for the footprints (default 1.0)
+--footprint-count N    shape families to write (default 16)
+--footprint-sizes N    real sizes of each shape to write (default 2)
+--footprint-iou F      overlap at which two shapes are one family (default 0.88)
+--footprint-dir DIR    where they go     (default models/footprints)
 ```
 
 Naming a tool on the command line — `--place`/`--center`/`--bbox`, `--no-map`
@@ -210,11 +263,12 @@ voxity/ui.py          2D widgets: rectangles, text, menubar
 city
 voxity/extract.py     .osm.pbf -> features inside the box (cached)
 voxity/tags.py        what OSM tags mean: width, height, colour
-voxity/geo.py         local metric projection, polygon/line clipping
+voxity/geo.py         local metric projection, clipping, ring/box helpers
 voxity/build.py       features -> triangles (extrusion, ribbons, roofs, trees)
 voxity/renderer.py    moderngl passes: shadow map, scene, sky, trees
 voxity/overview.py    the whole extract baked into one flat 2D map (cached)
 voxity/mapview.py     picking the region to play on, off that map
+voxity/footprints.py  the extract's commonest footprints -> voxel floor plans
 
 voxels
 voxity/voxel.py       the model, the palette, the greedy mesher, JSON
@@ -232,9 +286,11 @@ x east, z south, y up. The editor works in unit cells with the same axes.
 The first run for a box reads the whole `.pbf` (~15 s for Hamburg). Both the
 extracted features and the built mesh land in `cache/`, so the same square
 opens in a couple of seconds afterwards. The overview map is cached there too,
-and costs about 70 s the first time. `--no-cache` skips all three — which now
-means re-baking the map as well, so it is a slow flag. Deleting `cache/` is
-always safe.
+and costs about 70 s the first time; the footprint survey is cached there too and
+costs 4-5 minutes. `--no-cache` skips all four — which means re-baking the map
+and re-reading every building as well, so it is a slow flag. Deleting `cache/` is always safe; note that the
+footprint *models* are not in there, they are work product under
+`models/footprints/`.
 
 ## Setup
 
