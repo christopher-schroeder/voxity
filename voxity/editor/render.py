@@ -22,6 +22,8 @@ AXIS_Z_COL = (0.30, 0.30, 0.55)
 FOOT_IN_COL = (0.32, 0.46, 0.38)
 FOOT_EDGE_COL = (0.45, 0.95, 0.60)
 
+WIRE_COL = (0.06, 0.06, 0.08)   # the triangle overlay, dark against every hue
+
 
 def _grid_lines():
     """Line segments for the floor grid, with brighter centre axes."""
@@ -92,8 +94,13 @@ class EditorRenderer:
         self.line_prog = ctx.program(vertex_shader=shaders.LINE_VS,
                                      fragment_shader=shaders.LINE_FS)
 
+        self.wire_prog = ctx.program(vertex_shader=shaders.WIRE_VS,
+                                     fragment_shader=shaders.WIRE_FS)
+        self.wire_prog['u_col'].value = WIRE_COL
+
         self.vbo = None
         self.vao = None
+        self.wire_vao = None
         self.n_verts = 0
 
         grid = _grid_lines()
@@ -130,8 +137,9 @@ class EditorRenderer:
         """Replace the voxel mesh. `verts` is the (N, 10) shared layout."""
         if self.vao is not None:
             self.vao.release()
+            self.wire_vao.release()
             self.vbo.release()
-            self.vao = self.vbo = None
+            self.vao = self.wire_vao = self.vbo = None
         self.n_verts = len(verts)
         if not self.n_verts:
             return
@@ -140,12 +148,17 @@ class EditorRenderer:
         self.vao = self.ctx.vertex_array(
             self.voxel_prog,
             [(self.vbo, '3f 3f 3f 4x', 'in_pos', 'in_norm', 'in_col')])
+        # a second view of the very same buffer, position only, so the overlay
+        # is the triangles that were actually drawn and not a copy of them
+        self.wire_vao = self.ctx.vertex_array(
+            self.wire_prog, [(self.vbo, '3f 28x', 'in_pos')])
 
-    def draw(self, camera, aspect, show_grid=True, boxes=()):
+    def draw(self, camera, aspect, show_grid=True, boxes=(), show_wire=False):
         ctx = self.ctx
         vp = to_gl(camera.projection(aspect) @ camera.view())
         self.line_prog['u_vp'].write(vp)
         self.voxel_prog['u_vp'].write(vp)
+        self.wire_prog['u_vp'].write(vp)
 
         # The grid is drawn with the depth test off, so it never writes depth
         # and the model covers it wherever the model is — exactly what the
@@ -162,6 +175,19 @@ class EditorRenderer:
         ctx.cull_face = 'back'
         if self.n_verts:
             self.vao.render(moderngl.TRIANGLES, vertices=self.n_verts)
+            if show_wire:
+                # The lines come from the same vertices as the surface under
+                # them, so they land at exactly its depth. '<' rejects all of
+                # them and '<=' keeps them only where the interpolated depth
+                # happens to round the same way, which stipples every edge that
+                # is not axis-aligned on screen. Pulling them a hair towards the
+                # camera is the fix; the depth test stays on so the model still
+                # hides its own far side.
+                ctx.wireframe = True
+                ctx.polygon_offset = -1.0, -1.0
+                self.wire_vao.render(moderngl.TRIANGLES, vertices=self.n_verts)
+                ctx.polygon_offset = 0.0, 0.0
+                ctx.wireframe = False
 
         # the border stays on top of everything: it is the limit being built
         # against, and is useless the moment a wall hides it
@@ -182,10 +208,11 @@ class EditorRenderer:
     def release(self):
         if self.vao is not None:
             self.vao.release()
+            self.wire_vao.release()
             self.vbo.release()
         if self.foot_vao is not None:
             self.foot_vao.release()
             self.foot_vbo.release()
         for obj in (self.grid_vao, self.grid_vbo, self.box_vao, self.box_vbo,
-                    self.voxel_prog, self.line_prog):
+                    self.voxel_prog, self.line_prog, self.wire_prog):
             obj.release()

@@ -303,7 +303,7 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   pygame** — that is what lets the city import it. `mesh_vertices(quads, scale, offset)`
   is the bridge to the city: `scale` is the cell size in metres.
 - **voxity/editor/** — the editing half. `app.py` owns the loop and the layout, `pick.py`
-  is the DDA ray march, `render.py` the two GL programs, `io.py` the file dialog and the
+  is the DDA ray march, `render.py` the three GL programs, `io.py` the file dialog and the
   OBJ/PNG exports, `choose.py` the modal footprint picker (its own loop, like
   startscreen.py). The footprint a model is built on is `{(x, z)}` on `Editor`, enforced
   in one place — `Editor.allowed` — and stored in the model's JSON under `footprint`, so
@@ -530,6 +530,23 @@ do not round to the same twentieths. And scale invariance holds at the *family* 
 only — a 9.6 m square on a 1 m grid genuinely loses a corner cell that a 12 m one keeps,
 so asserting equal canonical keys across scales will fail; assert that `families()` puts
 them together.
+
+## The editor's triangle overlay
+
+`T` / **View → Show Triangles** draws the model's own vertex buffer a second time with
+`ctx.wireframe`, through `WIRE_VS`/`WIRE_FS` — position only, one uniform colour. It is a
+second VAO over the *same* buffer (`'3f 28x'`, exactly like `scene_depth_vao`), so what
+you see is the triangulation that was drawn and not a reconstruction of it. `LINE_VS`
+cannot serve here: it takes a colour per vertex, and a wireframe in the model's own hues
+is invisible against the model.
+
+The one thing that needs care is depth. The lines come from the same vertices as the
+surface under them, so they land at exactly its depth: `'<'` rejects every one of them,
+and `'<='` keeps them only where the interpolated depth happens to round the same way,
+which stipples every edge that is not axis-aligned on screen. `ctx.polygon_offset =
+-1.0, -1.0` for the duration is the fix. Reset both `wireframe` and `polygon_offset`
+immediately — the context is shared with the city and with ui.py, both of which draw
+triangles.
 
 ## Houses, and putting them on buildings
 

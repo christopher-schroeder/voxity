@@ -53,8 +53,9 @@ MENU_DEFS = [
     ('File', [('New', 'new'), ('Open...', 'open'), ('Save', 'save'),
               ('Save As...', 'save_as'), ('Export OBJ...', 'export_obj'),
               ('Export PNG...', 'export_png'), ('Back to menu', 'menu')]),
-    ('View', [('Toggle Grid', 'toggle_grid'), ('Reset Camera', 'reset_cam'),
-              ('Frame Model', 'frame'), ('Reset Brush', 'reset_brush')]),
+    ('View', [('Toggle Grid', 'toggle_grid'), ('Show Triangles', 'toggle_wire'),
+              ('Reset Camera', 'reset_cam'), ('Frame Model', 'frame'),
+              ('Reset Brush', 'reset_brush')]),
     ('Ground', [('Choose Footprint...', 'fp_choose'),
                 ('Open Footprint File...', 'fp_open'),
                 ('Clear Footprint', 'fp_clear')]),
@@ -69,6 +70,7 @@ HELP = [
     ('swatch or 1-0   hue', True),
     ('X Y Z  grow brush axis   +shift  shrink', True),
     (', .  shrink / grow all three    G  grid', True),
+    ('T  show the triangles over the model', True),
     ('S / L  save / load    F  frame model', True),
     ('B  choose a footprint to build on', True),
     ('ESC  back to the menu', True),
@@ -171,6 +173,7 @@ class Editor:
         self.hue = voxel.N_HUES // 2
         self.brush = DEFAULT_BRUSH
         self.show_grid = True
+        self.show_wire = False                # triangle overlay, off by default
         self.dirty = True
         self.hover = None                     # cell under the cursor
         self.block = None                     # min corner of the block to place
@@ -258,7 +261,7 @@ class Editor:
                 boxes.append(box_lines(self.block, self.brush,
                                        PLACE_COL if fits else BLOCKED_COL))
         self.renderer.draw(self.cam, size[0] / max(size[1], 1),
-                           self.show_grid, boxes)
+                           self.show_grid, boxes, self.show_wire)
 
     def draw_ui(self, ui, menubar, size, mouse):
         ui.begin(size)
@@ -333,6 +336,8 @@ def _menu_action(ed, action, ctx, size):
             io.export_png(ctx, size, p)
     elif action == 'toggle_grid':
         ed.show_grid = not ed.show_grid
+    elif action == 'toggle_wire':
+        ed.show_wire = not ed.show_wire
     elif action == 'reset_cam':
         ed.cam = OrbitCamera(target=voxel.centre(ed.voxels))
     elif action == 'frame':
@@ -436,6 +441,8 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                     running = False
                 elif k == pygame.K_g:
                     ed.show_grid = not ed.show_grid
+                elif k == pygame.K_t:
+                    ed.show_wire = not ed.show_wire
                 elif k == pygame.K_f:
                     ed.frame()
                 elif k == pygame.K_s:

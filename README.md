@@ -46,6 +46,7 @@ is what gives a flat wall its mosaic.
 | click a stepper | the same, with the mouse |
 | `,` `.` | shrink / grow all three axes at once |
 | `G` | floor grid |
+| `T` | the triangles, drawn over the model |
 | `F` | frame the model |
 | `S` `L` | save / load the current model |
 | `B` | choose a footprint to build on |
@@ -58,6 +59,12 @@ working — a flat wall of one hue is two triangles however many voxels it is, s
 a voxel count that climbs while the triangle count does not is merging doing its
 job. The numbers are what the mesher just produced, not an estimate, so they
 update the moment you place or delete a block.
+
+`T`, or **View → Show Triangles**, draws those triangles over the model, so you
+can see where merging did and did not happen: one wall of a single hue comes out
+as a couple of large quads, and every window in it as a quad of its own. It is
+the same buffer the model is drawn from, so it is the real triangulation and not
+a redrawing of it, and the depth test stays on so the far side stays hidden.
 
 The block moves in **single cells** at any size, rather than snapping to a grid
 of its own size: it centres on the cell under the cursor, and sits on the empty

@@ -210,6 +210,22 @@ out vec4 f_color;
 void main() { f_color = vec4(v_col, 1.0); }
 """
 
+# The editor's triangle overlay: the scene layout with everything but the
+# position ignored, drawn in one flat colour. LINE_VS cannot do this — it takes
+# its colour per vertex, and a wireframe in the model's own hues is invisible
+# against the model it is drawn over.
+WIRE_VS = """#version 330 core
+in vec3 in_pos;
+uniform mat4 u_vp;
+void main() { gl_Position = u_vp * vec4(in_pos, 1.0); }
+"""
+
+WIRE_FS = """#version 330 core
+uniform vec3 u_col;
+out vec4 f_color;
+void main() { f_color = vec4(u_col, 1.0); }
+"""
+
 # Flat 2D shapes for the UI, in pixels with y growing downward — the same
 # coordinates pygame reports for the mouse, so hit tests and drawing agree.
 UI_VS = """#version 330 core
