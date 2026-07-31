@@ -340,9 +340,9 @@ of the extract. Its output is a flat PNG, and mapview.py only ever sees that ima
   pygame** — that is what lets the city import it. `mesh_vertices(quads, scale, offset)`
   is the bridge to the city: `scale` is the cell size in metres.
 - **voxity/editor/** — the editing half. `app.py` owns the loop and the layout, `pick.py`
-  is the DDA ray march, `render.py` the three GL programs, `io.py` the file dialog and the
-  OBJ/PNG exports, `choose.py` the modal footprint picker (its own loop, like
-  startscreen.py). The footprint a model is built on is `{(x, z)}` on `Editor`, enforced
+  is the DDA ray march, `render.py` the three GL programs, `io.py` the OBJ/PNG exports,
+  `browse.py` the open/save dialog and `choose.py` the modal footprint picker (both own
+  their loop, like startscreen.py). The footprint a model is built on is `{(x, z)}` on `Editor`, enforced
   in one place — `Editor.allowed` — and stored in the model's JSON under `footprint`, so
   `voxel.save` takes it and `voxel.load_footprint` reads it back. `voxel.load` is
   unchanged and still returns only voxels, which is why every other caller was untouched.
@@ -725,6 +725,29 @@ the currently bound framebuffer and is what the headless checks need. And a prev
 where toggling `shadows` changes nothing is almost always a camera with the cast shadow
 hidden behind the model; at the default sun the shadow falls towards +x/-z, so look from
 yaw 215 before concluding the shadow map is broken.
+
+## Dialogs are drawn in the window, not by another toolkit
+
+`browse.py` (open/save) and `choose.py` (footprints) are modal loops of our own,
+drawing with ui.py. Open/save used tkinter's `filedialog` and it was wrong twice over:
+Tk draws its own file dialog on Unix — that grey listbox is Tk's, not the desktop's, and
+no theme changes it — and it runs a nested Tcl event loop beside SDL's, which is what
+left its buttons not responding to clicks. **Do not reach for tkinter again.** Nothing
+else can be holding the mouse when the loop reading the mouse is ours.
+
+Shelling out to `zenity`/`kdialog` is the other obvious idea and is worse here: it is a
+guess about the desktop, and this machine has none of them installed.
+
+`browse.layout` is shared by the drawing and by `row_at`, which is how the hit test stays
+the draw rectangle (ui.py's rule). `paint` is separate from the loop so the dialog can be
+rendered into an offscreen buffer and looked at without a window — the same trick the
+editor's chrome needs, and the only way to check a dialog whose whole complaint was that
+it was ugly.
+
+Clicking means different things in the two modes on purpose: **opening**, a click on a
+file is the answer; **saving**, it only copies the name into the field, because the answer
+is what the field says at Enter and a stray click should not quietly pick a different file
+to overwrite.
 
 ## The editor's triangle overlay
 

@@ -99,7 +99,9 @@ where they are and merely counted on the console. The footprint is saved into
 the model, so reopening a half-built house puts its limits back.
 
 **File** does New / Open / Save / Save As / Export OBJ / Export PNG through a
-native dialog when tkinter is available. Models are JSON under `models/`.
+file browser drawn in the window itself — click a folder to enter it, `..` or
+backspace to go up, and when saving, type the name and press Enter. Models are
+JSON under `models/`.
 
 Two passes turn the voxel dict into as few triangles as possible without
 changing what you see. **Exterior-cavity culling** flood-fills empty space

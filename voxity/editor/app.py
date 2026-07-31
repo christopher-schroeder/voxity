@@ -17,6 +17,7 @@ from ..build import GROUND_COLOUR
 from ..camera import OrbitCamera, screen_ray, to_gl
 from ..mesh import MAT_MATTE, MeshBuilder
 from . import io
+from .browse import ask_path
 from .choose import choose_footprint
 from .pick import DEFAULT_BRUSH, brush_block, pick, resize_brush
 from .render import EditorRenderer, box_lines
@@ -397,14 +398,23 @@ class Editor:
             self.city.release()
 
 
+def _ask(ctx, size, save, title, default, patterns):
+    """Run the file browser, with a UI of its own like the footprint picker."""
+    ui = uikit.UI(ctx)
+    try:
+        return ask_path(ctx, ui, size, save, title, default, patterns)
+    finally:
+        ui.release()
+
+
 def _menu_action(ed, action, ctx, size):
     """Apply a menubar action. Returns an outcome string, or None to carry on."""
     if action == 'new':
         ed.voxels = {}
         ed.dirty = True
     elif action == 'open':
-        p = io.ask_path(False, 'Open model', ed.path,
-                        [('JSON', '*.json'), ('All files', '*.*')])
+        p = _ask(ctx, size, False, 'Open model', ed.path,
+                 [('JSON', '*.json'), ('All files', '*.*')])
         if p:
             try:
                 ed.voxels = voxel.load(p)
@@ -418,17 +428,19 @@ def _menu_action(ed, action, ctx, size):
     elif action == 'save':
         _save(ed, ed.path)
     elif action == 'save_as':
-        p = io.ask_path(True, 'Save model as', os.path.basename(ed.path),
-                        [('JSON', '*.json')])
+        p = _ask(ctx, size, True, 'Save model as', ed.path,
+                 [('JSON', '*.json')])
         if p:
             ed.path = p
             _save(ed, p)
     elif action == 'export_obj':
-        p = io.ask_path(True, 'Export OBJ', 'model.obj', [('OBJ', '*.obj')])
+        p = _ask(ctx, size, True, 'Export OBJ', 'model.obj',
+                 [('OBJ', '*.obj')])
         if p:
             io.export_obj(ed.voxels, p)
     elif action == 'export_png':
-        p = io.ask_path(True, 'Export PNG', 'model.png', [('PNG', '*.png')])
+        p = _ask(ctx, size, True, 'Export PNG', 'model.png',
+                 [('PNG', '*.png')])
         if p:
             # redraw the 3D view alone so no UI ends up in the file
             ctx.screen.use()
@@ -450,8 +462,8 @@ def _menu_action(ed, action, ctx, size):
     elif action == 'fp_choose':
         _choose_ground(ed, ctx, size)
     elif action == 'fp_open':
-        p = io.ask_path(False, 'Open footprint', footprints.OUT_DIR,
-                        [('JSON', '*.json'), ('All files', '*.*')])
+        p = _ask(ctx, size, False, 'Open footprint', footprints.OUT_DIR,
+                 [('JSON', '*.json'), ('All files', '*.*')])
         if p:
             _set_ground_from(ed, p)
     elif action == 'fp_clear':

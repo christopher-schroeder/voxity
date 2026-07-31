@@ -1,7 +1,9 @@
-"""File dialogs and the exports that only the editor needs.
+"""The exports that only the editor needs.
 
 Model JSON lives in voxel.py, because the city has to read it too; OBJ and PNG
-are editor-only, so they live here.
+are editor-only, so they live here. Choosing the path is `browse.py` — this used
+to hand that to tkinter, whose Unix file dialog is drawn by Tk rather than by
+the desktop and whose nested Tcl event loop fought SDL for the mouse.
 """
 
 import os
@@ -9,27 +11,6 @@ import os
 import pygame
 
 from .. import voxel
-
-
-def ask_path(save, title, default, patterns):
-    """Native open/save dialog via tkinter; falls back to `default` on failure."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        if save:
-            path = filedialog.asksaveasfilename(
-                title=title, initialfile=default, filetypes=patterns)
-        else:
-            path = filedialog.askopenfilename(title=title, filetypes=patterns)
-        root.update()
-        root.destroy()
-        return path or None
-    except Exception as exc:                   # noqa: BLE001 - env dependent
-        print(f'file dialog unavailable ({exc}); using {default!r}')
-        return default
 
 
 def export_obj(voxels, path):
