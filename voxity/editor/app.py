@@ -13,7 +13,9 @@ import pygame
 from .. import footprints
 from .. import ui as uikit
 from .. import voxel
-from ..camera import OrbitCamera, screen_ray
+from ..build import GROUND_COLOUR
+from ..camera import OrbitCamera, screen_ray, to_gl
+from ..mesh import MAT_MATTE, MeshBuilder
 from . import io
 from .choose import choose_footprint
 from .pick import DEFAULT_BRUSH, brush_block, pick, resize_brush
@@ -44,6 +46,16 @@ STATS_TOP = BRUSH_TOP + 3 * BRUSH_ROW_H + ROW_GAP
 STATS_LINE_H = 17
 STATS_COL = (0.62, 0.66, 0.72)
 STATS_KEY_COL = (0.82, 0.86, 0.90)
+# A dark backing for that column. The labels are a muted grey chosen against
+# the editor's near-black background, and the city-lighting preview puts a
+# sunlit ground behind them, where they vanish.
+PANEL_COL = (0.08, 0.09, 0.11, 0.62)
+
+# The city-lighting preview stands the model on a patch of ground this many
+# metres across. There has to be one: half of what the city's look does to a
+# building is the contact shadow and the occlusion where it meets the ground,
+# and a model floating in the sky shows neither.
+CITY_GROUND_M = 40.0
 
 HOVER_COL = (0.95, 0.30, 0.30)      # the voxel a right-click would delete
 PLACE_COL = (0.30, 0.95, 0.40)      # where a left-click would add
@@ -54,6 +66,7 @@ MENU_DEFS = [
               ('Save As...', 'save_as'), ('Export OBJ...', 'export_obj'),
               ('Export PNG...', 'export_png'), ('Back to menu', 'menu')]),
     ('View', [('Toggle Grid', 'toggle_grid'), ('Show Triangles', 'toggle_wire'),
+              ('City Lighting', 'toggle_city'),
               ('Reset Camera', 'reset_cam'), ('Frame Model', 'frame'),
               ('Reset Brush', 'reset_brush')]),
     ('Ground', [('Choose Footprint...', 'fp_choose'),
@@ -71,6 +84,7 @@ HELP = [
     ('X Y Z  grow brush axis   +shift  shrink', True),
     (', .  shrink / grow all three    G  grid', True),
     ('T  show the triangles over the model', True),
+    ('C  light it the way the city will', True),
     ('S / L  save / load    F  frame model', True),
     ('B  choose a footprint to build on', True),
     ('ESC  back to the menu', True),
@@ -125,6 +139,18 @@ def model_stats(voxels, n_verts):
             f'{len(voxels):,} voxels']
 
 
+def ground_verts(half_m, cell=voxel.CELL_M):
+    """A square of city ground under the preview, in **metres**."""
+    mb = MeshBuilder()
+    quad = np.array([[-half_m, 0.0, -half_m], [half_m, 0.0, -half_m],
+                     [half_m, 0.0, half_m], [-half_m, 0.0, -half_m],
+                     [half_m, 0.0, half_m], [-half_m, 0.0, half_m]],
+                    dtype=np.float32)
+    mb.add(quad, np.array([0.0, 1.0, 0.0], dtype=np.float32),
+           np.array(GROUND_COLOUR, dtype=np.float32), MAT_MATTE)
+    return mb.pack()
+
+
 def seed_model():
     """Something on screen on a cold start, so the grid isn't just empty."""
     voxels = {}
@@ -174,6 +200,9 @@ class Editor:
         self.brush = DEFAULT_BRUSH
         self.show_grid = True
         self.show_wire = False                # triangle overlay, off by default
+        self.city_light = False               # preview through the city renderer
+        self.city = None                      # its Renderer, built on first use
+        self.city_stale = True
         self.dirty = True
         self.hover = None                     # cell under the cursor
         self.block = None                     # min corner of the block to place
@@ -209,6 +238,7 @@ class Editor:
         # produced, not an estimate of what it would produce
         self.stats = model_stats(self.voxels, len(verts))
         self.dirty = False
+        self.city_stale = True
         return verts
 
     def aim(self, mouse, size):
@@ -260,8 +290,64 @@ class Editor:
                                                            self.brush)))
                 boxes.append(box_lines(self.block, self.brush,
                                        PLACE_COL if fits else BLOCKED_COL))
-        self.renderer.draw(self.cam, size[0] / max(size[1], 1),
-                           self.show_grid, boxes, self.show_wire)
+        aspect = size[0] / max(size[1], 1)
+        if self.city_light:
+            self.draw_city(size, aspect, boxes)
+        else:
+            self.renderer.draw(self.cam, aspect, self.show_grid, boxes,
+                               self.show_wire)
+
+    # --- the city-lighting preview ------------------------------------------
+
+    def city_verts(self):
+        """The model in metres, standing on a patch of ground.
+
+        The city works in metres and this is the only place the two scales
+        meet: everything the preview is meant to show — the shadow's length,
+        how wide the ambient occlusion reads, how far the fog is — is decided
+        in metres, so scaling here rather than teaching the renderer about
+        cells is what makes the preview honest.
+        """
+        verts = voxel.model_vertices(self.voxels)
+        verts = np.array(verts, dtype='f4', copy=True)
+        verts[:, :3] *= voxel.CELL_M
+        # the cell slot stays in cells: it is what the mosaic hashes, and it is
+        # deliberately independent of how big a cell is in the world
+        return np.vstack([ground_verts(CITY_GROUND_M), verts])
+
+    def city_camera(self):
+        """The editor's camera, in metres."""
+        return OrbitCamera(target=self.cam.target * voxel.CELL_M,
+                           yaw=self.cam.yaw, pitch=self.cam.pitch,
+                           distance=self.cam.distance * voxel.CELL_M)
+
+    def draw_city(self, size, aspect, boxes):
+        from ..renderer import Renderer
+
+        verts = self.city_verts() if (self.city is None or self.city_stale) else None
+        extent = (-CITY_GROUND_M, -CITY_GROUND_M, CITY_GROUND_M, CITY_GROUND_M)
+        if self.city is None:
+            self.city = Renderer(self.ctx, verts,
+                                 np.zeros((0, 5), dtype='f4'), extent)
+        elif self.city_stale:
+            self.city.set_geometry(verts, extent)
+        self.city_stale = False
+
+        cam = self.city_camera()
+        cam.far = 4000.0
+        # Whatever is bound, not ctx.screen: everything else here draws into the
+        # current target, and the headless checks bind an offscreen one.
+        # `ctx.screen` is None in a standalone context, so it is the fallback
+        # rather than the first choice.
+        target = self.ctx.fbo or self.ctx.screen
+        self.city.render(target, cam, aspect, size=size)
+        # the cursors go back on top afterwards: the city renderer owns its own
+        # depth buffer and clears the target's, so there is nothing left to
+        # depth-test them against. Their geometry is in cells, so the scale
+        # rides in the matrix rather than in the vertices.
+        scale = np.diag([voxel.CELL_M, voxel.CELL_M, voxel.CELL_M, 1.0])
+        vp = to_gl(cam.projection(aspect) @ cam.view() @ scale)
+        self.renderer.draw_cursors(vp, boxes)
 
     def draw_ui(self, ui, menubar, size, mouse):
         ui.begin(size)
@@ -269,10 +355,23 @@ class Editor:
             x, y, w, h = swatch_rect(i)
             ui.rect(x, y, w, h, voxel.color_rgb(i, voxel.CENTRE_VALUE))
         ui.outline(*swatch_rect(self.hue), (1.0, 1.0, 1.0), px=3)
+        self._draw_panel(ui)
         self._draw_brush(ui)
         self._draw_stats(ui)
         menubar.draw(size[0], mouse)
         ui.flush()
+
+    def _draw_panel(self, ui):
+        """The backing rectangle for the brush steppers and the stats.
+
+        Measured off the widest line rather than a fixed width, since the stats
+        change length as the model grows.
+        """
+        wide = max((ui.measure(line)[0] for line in self.stats), default=0)
+        wide = max(wide, BRUSH_LBL_W + 2 * BRUSH_BTN + BRUSH_VAL_W)
+        top = BRUSH_TOP - ROW_GAP
+        bottom = STATS_TOP + len(self.stats) * STATS_LINE_H + ROW_GAP // 2
+        ui.rect(0, top, wide + 2 * SWATCH_MARGIN, bottom - top, PANEL_COL)
 
     def _draw_stats(self, ui):
         for i, line in enumerate(self.stats):
@@ -294,6 +393,8 @@ class Editor:
 
     def release(self):
         self.renderer.release()
+        if self.city is not None:
+            self.city.release()
 
 
 def _menu_action(ed, action, ctx, size):
@@ -338,6 +439,8 @@ def _menu_action(ed, action, ctx, size):
         ed.show_grid = not ed.show_grid
     elif action == 'toggle_wire':
         ed.show_wire = not ed.show_wire
+    elif action == 'toggle_city':
+        ed.city_light = not ed.city_light
     elif action == 'reset_cam':
         ed.cam = OrbitCamera(target=voxel.centre(ed.voxels))
     elif action == 'frame':
@@ -443,6 +546,8 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                     ed.show_grid = not ed.show_grid
                 elif k == pygame.K_t:
                     ed.show_wire = not ed.show_wire
+                elif k == pygame.K_c:
+                    ed.city_light = not ed.city_light
                 elif k == pygame.K_f:
                     ed.frame()
                 elif k == pygame.K_s:

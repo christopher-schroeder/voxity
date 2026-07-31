@@ -50,6 +50,7 @@ it on a street that runs at an angle.
 | `,` `.` | shrink / grow all three axes at once |
 | `G` | floor grid |
 | `T` | the triangles, drawn over the model |
+| `C` | light it the way the city will |
 | `F` | frame the model |
 | `S` `L` | save / load the current model |
 | `B` | choose a footprint to build on |
@@ -68,6 +69,14 @@ can see where merging did and did not happen: one wall of a single hue comes out
 as a couple of large quads, and every window in it as a quad of its own. It is
 the same buffer the model is drawn from, so it is the real triangulation and not
 a redrawing of it, and the depth test stays on so the far side stays hidden.
+
+`C`, or **View → City Lighting**, stands the model on a patch of ground and
+draws it through the game's own renderer — the real sun, shadows, ambient
+occlusion and colour grading, not an approximation of them. It is there because
+the editor's normal shading is deliberately flat: you are picking hues from a
+palette, and what is on screen has to *be* the hue you clicked, which it cannot
+be once a sun and a tone curve have been through it. So build in the flat view
+and press `C` to see what the city will make of it.
 
 The block moves in **single cells** at any size, rather than snapping to a grid
 of its own size: it centres on the cell under the cursor, and sits on the empty

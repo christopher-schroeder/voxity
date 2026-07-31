@@ -127,7 +127,9 @@ class Renderer:
         self.sky_prog = ctx.program(vertex_shader=shaders.SKY_VS,
                                     fragment_shader=shaders.SKY_FS)
 
-        self.vbo = ctx.buffer(verts.tobytes() if len(verts) else b'\x00' * 40)
+        # 52 bytes is one vertex of the layout in mesh.py; an empty scene still
+        # needs a buffer for the vertex array to bind to
+        self.vbo = ctx.buffer(verts.tobytes() if len(verts) else b'\x00' * 52)
         self.n_verts = len(verts)
         self.scene_vao = ctx.vertex_array(
             self.scene_prog,
@@ -194,6 +196,34 @@ class Renderer:
             (self.tree_inst_vbo, '2f 1f 1f 4x/i',
              'in_offset', 'in_height', 'in_radius'),
         ])
+
+    def set_geometry(self, verts, extent=None):
+        """Replace the scene's triangles in place.
+
+        Only the editor's city-lighting preview uses this. The city builds one
+        Renderer per square and throws it away, but the preview re-uploads on
+        every edit, and rebuilding the whole Renderer between two keystrokes
+        would mean recompiling five programs and reallocating a 2048-square
+        shadow map each time.
+        """
+        self.scene_vao.release()
+        self.scene_depth_vao.release()
+        self.vbo.release()
+        self.n_verts = len(verts)
+        data = np.ascontiguousarray(verts, dtype='f4')
+        self.vbo = self.ctx.buffer(data.tobytes() if self.n_verts else b'\x00' * 52)
+        self.scene_vao = self.ctx.vertex_array(
+            self.scene_prog,
+            [(self.vbo, '3f 3f 3f 1f 3f',
+              'in_pos', 'in_norm', 'in_col', 'in_mat', 'in_cell')])
+        self.scene_depth_vao = self.ctx.vertex_array(
+            self.depth_prog, [(self.vbo, '3f 40x', 'in_pos')])
+        if extent is not None:
+            self.extent = extent
+            span = max(extent[2] - extent[0], extent[3] - extent[1])
+            self.fog_density = 1.0 / (span + 1500.0)
+        # the sun has not moved, but what it is shining on has
+        self._shadow_key = None
 
     def _release_buffers(self):
         for obj in (self.scene_fbo, self.ao_fbo, self.colour_tex,

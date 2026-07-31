@@ -3,8 +3,10 @@
 Deliberately thin. The mesh it uploads is the shared layout from mesh.py, and
 the only reason it exists at all rather than reusing `renderer.Renderer` is
 lighting: the editor wants its own fixed light and no shadows, fog or tone
-mapping, so a hue on screen is the hue in the palette. Swap this program for
-`SCENE_VS`/`SCENE_FS` and the very same buffer renders as part of a city.
+mapping, so a hue on screen is the hue in the palette, which is what makes the
+swatches worth clicking. The very same buffer renders as part of a city through
+`SCENE_VS`/`SCENE_FS` — and does, on demand, when City Lighting is switched on
+(see `Editor.draw_city`).
 """
 
 import moderngl
@@ -199,6 +201,22 @@ class EditorRenderer:
                 self.wire_vao.render(moderngl.TRIANGLES, vertices=self.n_verts)
                 ctx.polygon_offset = 0.0, 0.0
                 ctx.wireframe = False
+
+        self.draw_cursors(vp, boxes)
+
+    def draw_cursors(self, vp, boxes=()):
+        """The footprint border and the hover / placement boxes, over anything.
+
+        Split out of `draw` so the city-lighting preview can reuse it: that
+        draws the model through the city's own renderer, which owns its passes
+        and its depth buffer, and then wants only the cursors put back on top.
+
+        `vp` is a packed view-projection, not a camera, because the preview has
+        to fold a cells-to-metres scale into it — this geometry is in cells and
+        the city works in metres.
+        """
+        ctx = self.ctx
+        self.line_prog['u_vp'].write(vp)
 
         # the border stays on top of everything: it is the limit being built
         # against, and is useless the moment a wall hides it

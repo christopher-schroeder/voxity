@@ -161,7 +161,17 @@ square_bbox(9.9937, 53.5503, 600)))[0].shape)"
 # 12. the same square with every building extruded, for an A/B
 ./env/bin/voxity --place wandsbek --size 800 --no-voxel-houses --screenshot flat.png
 
-# 13. the post chain's switches, which is also the cheapest way to see what
+# 13. the editor's city-lighting preview needs a pygame display surface for
+#     ui text but no X server; see the SDL_VIDEODRIVER=dummy note below
+./env/bin/python -c "import os; os.environ['SDL_VIDEODRIVER']='dummy'; \
+import pygame; pygame.init(); pygame.display.set_mode((16,16)); \
+import main as M; from voxity.editor import app; \
+ctx=M.standalone_context(); ed=app.Editor(ctx); ed.city_light=True; \
+f=ctx.framebuffer(color_attachments=[ctx.texture((320,240),4)], \
+ depth_attachment=ctx.depth_renderbuffer((320,240))); f.use(); \
+ed.draw_3d((320,240), over_ui=True); print('preview ok')"
+
+# 14. the post chain's switches, which is also the cheapest way to see what
 #     ambient occlusion and supersampling are each contributing
 ./env/bin/voxity --place wandsbek --size 400 --no-ao --screenshot noao.png
 ./env/bin/voxity --place wandsbek --size 400 --supersample 1 --screenshot raw.png
@@ -670,6 +680,51 @@ Every grading constant lives as an attribute on `Renderer.__init__` rather than 
 POST_FS, so they can be swept without recompiling a shader — `scratchpad/sweep.py`-style
 harnesses that instantiate a Renderer and `setattr` overrides are how these were found,
 and one-at-a-time iteration is much slower than tiling four at once.
+
+## Why the editor has its own voxel program
+
+`VOXEL_FS` is four lines of lighting; the *substance* is already shared. The vertex
+layout (mesh.py), the mesher and palette (voxel.py) and the mosaic hash are common, and
+the hash is **generated** into both programs by `shaders.voxel_value_glsl()` from the
+same constants, so a change to it lands in both without anyone remembering to. `place.py`
+hands the very same buffer to the city.
+
+What is not shared is the grade, and deliberately: **the editor is a colour-picking
+tool**. Click hue 9 and the model has to be hue 9. Through the city's chain it is not —
+sun colour, a shadow-map lookup, ambient, fog, then AO, ACES, saturation, split tone and
+a vignette — and what you see then depends on the sun angle, whether that face is in
+shadow, and where on screen it happens to be. Picking colours through a grade is
+guesswork. The swatch is `(0.33, 0.50, 0.25)` and the editor draws `(0.29, 0.44, 0.22)`;
+the city gives you something else entirely.
+
+**`C` / View → City Lighting** is the answer to the real complaint behind that, which is
+that you cannot otherwise tell what a hand-built house will look like in the game. It
+draws the model through the actual `Renderer` — the same class the city builds — so it is
+not an imitation that can drift. Three things it has to do:
+
+* **Scale to metres.** The city decides shadow length, AO radius and fog in metres, so
+  `Editor.city_verts` multiplies positions by `voxel.CELL_M`. It must *not* touch the
+  cell attribute: that is what the mosaic hashes and is in cells on purpose.
+* **Stand it on ground.** Half of what the look does to a building is the contact shadow
+  and the occlusion where it meets the ground, and a model floating in the sky shows
+  neither.
+* **Put the cursors back afterwards.** `Renderer` owns its passes and clears the target's
+  depth in the composite, so nothing survives to depth-test against; the hover and
+  placement boxes are drawn on top by `EditorRenderer.draw_cursors`, which takes a packed
+  view-projection rather than a camera because the scale has to ride in the matrix — that
+  geometry is in cells.
+
+`Renderer.set_geometry` exists only for this: the preview re-uploads on every edit, and
+rebuilding the Renderer between keystrokes would recompile five programs and reallocate a
+2048-square shadow map. It clears `_shadow_key`, since the sun has not moved but what it
+shines on has.
+
+Two things that look like bugs here and are not. `ctx.screen` **is None in a standalone
+context**, so `draw_city` targets `ctx.fbo or ctx.screen` in that order — `ctx.fbo` is
+the currently bound framebuffer and is what the headless checks need. And a preview shot
+where toggling `shadows` changes nothing is almost always a camera with the cast shadow
+hidden behind the model; at the default sun the shadow falls towards +x/-z, so look from
+yaw 215 before concluding the shadow map is broken.
 
 ## The editor's triangle overlay
 
