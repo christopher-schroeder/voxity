@@ -19,7 +19,9 @@ from ..mesh import MAT_MATTE, MeshBuilder
 from . import io
 from .browse import ask_path
 from .choose import choose_footprint
-from .pick import DEFAULT_BRUSH, brush_block, pick, resize_brush
+from .edits import History, changes
+from .pick import (DEFAULT_BRUSH, brush_block, erase_block, pick,
+                   resize_brush)
 from .render import EditorRenderer, box_lines
 
 DEFAULT_MODEL = voxel.DEFAULT_MODEL
@@ -70,6 +72,12 @@ MENU_DEFS = [
               ('City Lighting', 'toggle_city'),
               ('Reset Camera', 'reset_cam'), ('Frame Model', 'frame'),
               ('Reset Brush', 'reset_brush')]),
+    ('Edit', [('Undo', 'undo'), ('Redo', 'redo'),
+              ('Pick Hue Under Cursor', 'eyedrop'),
+              ('Paint Brush Area', 'paint'),
+              ('Fill Region', 'fill_region'),
+              ('Replace This Hue', 'replace_hue'),
+              ('Fill Enclosed Holes', 'fill_holes')]),
     ('Ground', [('Choose Footprint...', 'fp_choose'),
                 ('Open Footprint File...', 'fp_open'),
                 ('Clear Footprint', 'fp_clear')]),
@@ -80,7 +88,10 @@ BRUSH_KEYS = {pygame.K_x: 0, pygame.K_y: 1, pygame.K_z: 2}
 
 HELP = [
     ('L-drag orbit   R-drag pan   wheel zoom', True),
-    ('L-click add   R-click delete', True),
+    ('L-click add   R-click delete brush area', True),
+    ('shift L-click  paint   M-click  pick hue', True),
+    ('ctrl-Z undo   ctrl-Y redo', True),
+    ('H fill holes   K fill region   R replace hue', True),
     ('swatch or 1-0   hue', True),
     ('X Y Z  grow brush axis   +shift  shrink', True),
     (', .  shrink / grow all three    G  grid', True),
@@ -208,6 +219,7 @@ class Editor:
         self.hover = None                     # cell under the cursor
         self.block = None                     # min corner of the block to place
         self.footprint = None                 # {(x, z)} the building may occupy
+        self.history = History()
         self.stats = model_stats(self.voxels, 0)
         self.set_footprint(_footprint_of(model_path))
         self.frame()                          # open looking at whatever loaded
@@ -249,19 +261,108 @@ class Editor:
         self.hover, info = pick(self.voxels, origin, direction)
         self.block = brush_block(self.hover, info, self.brush)
 
+    # --- editing -----------------------------------------------------------
+    #
+    # Everything that changes the model goes through `apply`, so undo gets its
+    # diff without each command having to remember to record one.
+
+    def apply(self, wanted):
+        """Set or clear cells, recording the step. Returns how many changed."""
+        diff = changes(self.voxels, wanted)
+        if not diff:
+            return 0
+        before = {c: self.voxels.get(c) for c in diff}
+        for cell, hue in diff.items():
+            if hue is None:
+                self.voxels.pop(cell, None)
+            else:
+                self.voxels[cell] = hue
+        self.history.push(before)
+        self.dirty = True
+        return len(diff)
+
+    def set_model(self, voxels):
+        """Replace the whole model, undoably."""
+        wanted = dict.fromkeys(self.voxels)
+        wanted.update(voxels)
+        self.apply(wanted)
+
+    def undo(self):
+        n = self.history.undo(self.voxels)
+        self.dirty = self.dirty or bool(n)
+        print(f'undo: {n} cells' if n else 'nothing to undo')
+
+    def redo(self):
+        n = self.history.redo(self.voxels)
+        self.dirty = self.dirty or bool(n)
+        print(f'redo: {n} cells' if n else 'nothing to redo')
+
+    def erase_area(self):
+        """The brush-sized block centred on the hovered voxel, or None."""
+        return erase_block(self.hover, self.brush)
+
     def add(self):
         if self.block is None:
             return
         cells = self.allowed(voxel.block_cells(self.block, self.brush))
-        if not cells:
-            return
-        for cell in cells:
-            self.voxels[cell] = self.hue
-        self.dirty = True
+        self.apply(dict.fromkeys(cells, self.hue))
 
     def delete(self):
-        if self.hover is not None and self.voxels.pop(self.hover, None) is not None:
-            self.dirty = True
+        """Remove the brush-sized block under the cursor, not one voxel.
+
+        The brush is 1x1x1 by default, so this is the old behaviour until you
+        make the brush bigger — which is the point: one control sizes both what
+        you place and what you take away.
+        """
+        mn = self.erase_area()
+        if mn is None:
+            return
+        self.apply({c: None for c in voxel.block_cells(mn, self.brush)
+                    if c in self.voxels})
+
+    def paint(self):
+        """Recolour what is already there, without adding or removing anything."""
+        mn = self.erase_area()
+        if mn is None:
+            return
+        n = self.apply({c: self.hue for c in voxel.block_cells(mn, self.brush)
+                        if c in self.voxels})
+        if not n:
+            print('nothing under the brush to paint')
+
+    def eyedrop(self):
+        """Take the hue of the voxel under the cursor."""
+        hue = self.voxels.get(self.hover)
+        if hue is None:
+            print('no voxel under the cursor')
+            return
+        self.hue = int(hue)
+        print(f'hue {self.hue}')
+
+    def fill_region(self):
+        """Flood the connected same-hue run under the cursor with the current hue."""
+        if self.hover is None:
+            print('point at a voxel first')
+            return
+        cells = voxel.region(self.voxels, self.hover)
+        n = self.apply(dict.fromkeys(cells, self.hue))
+        print(f'filled {n} of {len(cells)} cells' if cells
+              else 'nothing to fill there')
+
+    def replace_hue(self):
+        """Every voxel of the hovered hue takes the current one."""
+        old = self.voxels.get(self.hover)
+        if old is None:
+            print('point at a voxel first')
+            return
+        n = self.apply({c: self.hue for c, h in self.voxels.items() if h == old})
+        print(f'replaced hue {old} with {self.hue} on {n} cells')
+
+    def fill_holes(self):
+        """Fill the sealed cavities inside the model with the current hue."""
+        holes = voxel.cavities(self.voxels)
+        n = self.apply(dict.fromkeys(holes, self.hue))
+        print(f'filled {n} enclosed cells' if n else 'no enclosed holes')
 
     def frame(self):
         """Point the camera at the model and back off far enough to see it.
@@ -285,7 +386,8 @@ class Editor:
         boxes = []
         if not over_ui:
             if self.hover is not None:
-                boxes.append(box_lines(self.hover, 1, HOVER_COL))
+                # brush-sized, because that is what a right-click now removes
+                boxes.append(box_lines(self.erase_area(), self.brush, HOVER_COL))
             if self.block is not None:
                 fits = bool(self.allowed(voxel.block_cells(self.block,
                                                            self.brush)))
@@ -410,16 +512,14 @@ def _ask(ctx, size, save, title, default, patterns):
 def _menu_action(ed, action, ctx, size):
     """Apply a menubar action. Returns an outcome string, or None to carry on."""
     if action == 'new':
-        ed.voxels = {}
-        ed.dirty = True
+        ed.set_model({})
     elif action == 'open':
         p = _ask(ctx, size, False, 'Open model', ed.path,
                  [('JSON', '*.json'), ('All files', '*.*')])
         if p:
             try:
-                ed.voxels = voxel.load(p)
+                ed.set_model(voxel.load(p))
                 ed.path = p
-                ed.dirty = True
                 ed.set_footprint(_footprint_of(p))
                 ed.frame()
                 print(f'loaded {len(ed.voxels)} voxels from {p}')
@@ -449,6 +549,20 @@ def _menu_action(ed, action, ctx, size):
             io.export_png(ctx, size, p)
     elif action == 'toggle_grid':
         ed.show_grid = not ed.show_grid
+    elif action == 'undo':
+        ed.undo()
+    elif action == 'redo':
+        ed.redo()
+    elif action == 'eyedrop':
+        ed.eyedrop()
+    elif action == 'paint':
+        ed.paint()
+    elif action == 'fill_region':
+        ed.fill_region()
+    elif action == 'replace_hue':
+        ed.replace_hue()
+    elif action == 'fill_holes':
+        ed.fill_holes()
     elif action == 'toggle_wire':
         ed.show_wire = not ed.show_wire
     elif action == 'toggle_city':
@@ -540,7 +654,7 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
             break
         size = pygame.display.get_window_size()
         mouse = pygame.mouse.get_pos()
-        click_add = click_del = False
+        click_add = click_del = click_paint = click_pick = False
         action = None
 
         for event in pygame.event.get():
@@ -551,7 +665,12 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                 ctx.viewport = (0, 0, *size)
             elif event.type == pygame.KEYDOWN:
                 k = event.key
-                if k == pygame.K_ESCAPE:
+                ctrl = event.mod & pygame.KMOD_CTRL
+                if ctrl and k == pygame.K_z:
+                    ed.redo() if event.mod & pygame.KMOD_SHIFT else ed.undo()
+                elif ctrl and k == pygame.K_y:
+                    ed.redo()
+                elif k == pygame.K_ESCAPE:
                     outcome = 'menu'
                     running = False
                 elif k == pygame.K_g:
@@ -560,16 +679,23 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                     ed.show_wire = not ed.show_wire
                 elif k == pygame.K_c:
                     ed.city_light = not ed.city_light
+                elif k == pygame.K_h:
+                    ed.fill_holes()
+                elif k == pygame.K_k:
+                    ed.fill_region()
+                elif k == pygame.K_r:
+                    ed.replace_hue()
+                elif k == pygame.K_i:
+                    ed.eyedrop()
                 elif k == pygame.K_f:
                     ed.frame()
                 elif k == pygame.K_s:
-                    _save(ed, ed.path)
+                    _save(ed, ed.path)   # ctrl-S too: there is nothing else on S
                 elif k == pygame.K_b:
                     _choose_ground(ed, ctx, size)
-                elif k == pygame.K_l:
+                elif k == pygame.K_l and not ctrl:
                     try:
-                        ed.voxels = voxel.load(ed.path)
-                        ed.dirty = True
+                        ed.set_model(voxel.load(ed.path))
                         ed.set_footprint(_footprint_of(ed.path))
                         print(f'loaded {len(ed.voxels)} voxels from {ed.path}')
                     except (OSError, ValueError, KeyError) as exc:
@@ -616,8 +742,14 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
                             ed.hue = hit
                         elif step is not None:
                             ed.brush = resize_brush(ed.brush, *step)
+                        elif pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                            click_paint = True
                         else:
                             click_add = True
+                    elif event.button == 2:
+                        # middle *click*; middle-drag is still panning, which
+                        # the drag threshold above has already ruled out
+                        click_pick = True
                     elif event.button == 3:
                         click_del = True
 
@@ -626,10 +758,15 @@ def run(ctx, size, model_path=DEFAULT_MODEL, frames=0, hud=None):
             ed.aim(mouse, size)
         else:
             ed.hover = ed.block = None
-        if click_add and not over_ui:
-            ed.add()
-        if click_del and not over_ui:
-            ed.delete()
+        if not over_ui:
+            if click_add:
+                ed.add()
+            if click_paint:
+                ed.paint()
+            if click_del:
+                ed.delete()
+            if click_pick:
+                ed.eyedrop()
 
         result = _menu_action(ed, action, ctx, size)
         if result:

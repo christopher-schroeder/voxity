@@ -726,6 +726,36 @@ where toggling `shadows` changes nothing is almost always a camera with the cast
 hidden behind the model; at the default sun the shadow falls towards +x/-z, so look from
 yaw 215 before concluding the shadow map is broken.
 
+## Editing, undo, and the ray that starts inside a wall
+
+**Everything that changes the model goes through `Editor.apply`**, which takes
+`{cell: hue or None}`, drops the entries that would change nothing, and records the
+inverse on `History`. Add a command by writing the dict, not by touching `self.voxels` —
+that is the only reason undo covers New and Open as well as the brush.
+
+History is **diffs, not snapshots**, and its budget is in *cells* rather than steps. At a
+quarter-metre cell a plain house is 24,000 voxels: a hundred snapshots is hundreds of
+megabytes, while a hundred strokes is a few thousand cells. Capping steps instead would
+let one "fill holes" over a large model quietly cost more than a thousand brush strokes.
+
+**`pick` returns a hit with no entry normal when the ray starts inside a solid cell**, and
+that was a crash — `brush_block` dereferenced the None. It is not an edge case: it is
+what the camera does the moment you zoom into the model. There genuinely is no face the
+ray came in through, so `brush_block` returns None and placement is simply off in there
+while deleting still works. A hollow model is the other case and behaves normally, since
+the origin lands in the cavity and the march finds the inner wall.
+
+`pick` also **clips the ray to the model's bounding box first**. Without that,
+`MAX_RAY_STEPS` had to cover the distance the camera happened to be at rather than the
+model — at a quarter-metre cell a house is two hundred cells across and a zoomed-out
+camera a thousand away, so picking silently stopped working past the old 256.
+
+`erase_block` centres the brush *on* the hovered cell where `brush_block` puts it
+*beside* one: deleting and painting act on what is there, placing adds next to it. Both
+lean an even brush one cell negative and hold y at the floor, which is why a 4-brush at
+the origin covers x,z of -1..2 and y of 0..3 — worth knowing before writing a test that
+asserts 27 cells and gets 36.
+
 ## Dialogs are drawn in the window, not by another toolkit
 
 `browse.py` (open/save) and `choose.py` (footprints) are modal loops of our own,

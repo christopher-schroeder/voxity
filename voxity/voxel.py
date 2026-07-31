@@ -171,6 +171,46 @@ def exterior_air(voxels):
     return outside
 
 
+def cavities(voxels):
+    """Empty cells sealed inside the model — what "fill holes" fills.
+
+    The complement of `exterior_air` inside the bounding box. These are exactly
+    the cells the mesher already refuses to draw faces against, so filling them
+    changes nothing you can see and everything about what the model *is*: a
+    hollow house that gets sliced open later has a solid one's interior.
+    """
+    if not voxels:
+        return set()
+    outside = exterior_air(voxels)
+    lo = [min(c[i] for c in voxels) for i in range(3)]
+    hi = [max(c[i] for c in voxels) for i in range(3)]
+    return {(x, y, z)
+            for x in range(lo[0], hi[0] + 1)
+            for y in range(lo[1], hi[1] + 1)
+            for z in range(lo[2], hi[2] + 1)
+            if (x, y, z) not in voxels and (x, y, z) not in outside}
+
+
+def region(voxels, start):
+    """Cells reachable from `start` through faces without changing hue.
+
+    The flood fill a paint bucket does: one wall of a house, not the house.
+    """
+    hue = voxels.get(start)
+    if hue is None:
+        return set()
+    seen = {start}
+    stack = [start]
+    while stack:
+        c = stack.pop()
+        for dx, dy, dz in NEIGHBOURS:
+            n = (c[0] + dx, c[1] + dy, c[2] + dz)
+            if n not in seen and voxels.get(n) == hue:
+                seen.add(n)
+                stack.append(n)
+    return seen
+
+
 def _make_quad(a, u, v, s, k, cu, cv, w, ht, hue):
     """Build a merged quad on the axis-`a` plane: (normal, hue, [4 corners])."""
     plane = k + 1 if s > 0 else k

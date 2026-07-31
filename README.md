@@ -43,7 +43,13 @@ it on a street that runs at an angle.
 | right-drag | pan |
 | wheel | zoom |
 | left-click | add a block on the green highlight |
-| right-click | delete the voxel under the red highlight |
+| shift left-click | repaint what is under the red highlight |
+| right-click | delete what is under the red highlight |
+| middle-click, `I` | take the hue of the voxel under the cursor |
+| `ctrl-Z` `ctrl-Y` | undo / redo |
+| `K` | flood the connected same-hue run with the current hue |
+| `R` | give every voxel of that hue the current one |
+| `H` | fill the sealed holes inside the model |
 | click a swatch, `1`–`9` `0` | set the hue |
 | `X` `Y` `Z` | grow the brush along that axis (`shift` to shrink) |
 | click a stepper | the same, with the mouse |
@@ -77,6 +83,19 @@ the editor's normal shading is deliberately flat: you are picking hues from a
 palette, and what is on screen has to *be* the hue you clicked, which it cannot
 be once a sun and a tone curve have been through it. So build in the flat view
 and press `C` to see what the city will make of it.
+
+**Deleting and painting use the brush too**, so the red highlight is always
+exactly what a right-click removes or a shift-click recolours — one control
+sizes both what you place and what you take away. Everything that changes the
+model is undoable, including New and Open; history is kept as differences rather
+than snapshots, so a hundred strokes cost a few thousand cells rather than a
+hundred copies of a 24,000-voxel house.
+
+**Fill holes** (`H`) fills the cavities sealed inside the model. They are
+invisible either way — the mesher already refuses to draw faces against them —
+but it is the difference between a hollow house and a solid one once something
+slices it open. **Fill region** (`K`) is a paint bucket: it stops at the first
+change of hue, so it colours one wall rather than the building.
 
 The block moves in **single cells** at any size, rather than snapping to a grid
 of its own size: it centres on the cell under the cursor, and sits on the empty

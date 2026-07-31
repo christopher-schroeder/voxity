@@ -9,7 +9,12 @@ import math
 
 import numpy as np
 
-MAX_RAY_STEPS = 256
+# Steps the grid march may take. The ray is clipped to the model's own box
+# first, so this bounds the model's diagonal rather than the distance the camera
+# happens to be at — without that, a quarter-metre cell put a house two hundred
+# cells across and a zoomed-out camera a thousand cells away, and picking simply
+# stopped working past the old limit.
+MAX_RAY_STEPS = 1024
 
 # Every voxel is a unit cube. The brush stamps a solid box of them, sized per
 # axis — walls and floors are the common shapes and neither is a cube.
@@ -17,14 +22,58 @@ BRUSH_MIN, BRUSH_MAX = 1, 32
 DEFAULT_BRUSH = (1, 1, 1)
 
 
+def _enter_box(o, d, lo, hi):
+    """Distance along the ray at which it enters the box, or None if it misses.
+
+    Slab test. Zero is returned for an origin already inside, so the march can
+    start where it is.
+    """
+    tmin, tmax = 0.0, math.inf
+    for a in range(3):
+        if abs(d[a]) < 1e-12:
+            if o[a] < lo[a] or o[a] > hi[a]:
+                return None
+            continue
+        t1 = (lo[a] - o[a]) / d[a]
+        t2 = (hi[a] - o[a]) / d[a]
+        if t1 > t2:
+            t1, t2 = t2, t1
+        tmin = max(tmin, t1)
+        tmax = min(tmax, t2)
+        if tmin > tmax:
+            return None
+    return tmin
+
+
+def _bounds(voxels, pad=1):
+    lo = [min(c[i] for c in voxels) - pad for i in range(3)]
+    hi = [max(c[i] for c in voxels) + 1 + pad for i in range(3)]
+    return lo, hi
+
+
 def pick(voxels, origin, direction):
     """First voxel the ray enters.
 
     Returns (hit_cell, entry_normal) for a hit, (None, ground_cell) when the
     ray only crosses the y=0 plane, or (None, None) when it misses everything.
+
+    **The normal is None when the ray starts inside a solid cell** — there is no
+    face it came in through. Callers must cope: `brush_block` returns None,
+    because there is no empty side to stamp against. This is what the camera
+    does the moment you zoom into the model, and dereferencing that None was a
+    crash.
     """
     o = np.asarray(origin, dtype=float)
     d = np.asarray(direction, dtype=float)
+    if voxels:
+        # Skip the empty space between the camera and the model, so the step
+        # budget covers the model rather than however far away you are standing.
+        lo, hi = _bounds(voxels)
+        t = _enter_box(o, d, lo, hi)
+        if t is None:
+            return None, _ground(o, d)
+        if t > 0.0:
+            o = o + d * t
     cell = np.floor(o).astype(int)
     step = np.where(d > 0, 1, -1)
     t_max = np.empty(3)
@@ -50,12 +99,15 @@ def pick(voxels, origin, direction):
         normal = tuple(-step[a] if a == axis else 0 for a in range(3))
         t_max[axis] += t_delta[axis]
 
-    # nothing hit: fall back to the ground plane at y = 0
+    return None, _ground(o, d)
+
+
+def _ground(o, d):
+    """Where the ray crosses y = 0, as a cell, or None if it never does."""
     if d[1] < 0 and o[1] > 0:
-        t = -o[1] / d[1]
-        p = o + t * d
-        return None, (int(np.floor(p[0])), 0, int(np.floor(p[2])))
-    return None, None
+        p = o + (-o[1] / d[1]) * d
+        return (int(np.floor(p[0])), 0, int(np.floor(p[2])))
+    return None
 
 
 def resize_brush(size, axis, delta):
@@ -77,6 +129,19 @@ def _centred(cell, extent):
     return cell - (extent - 1) // 2
 
 
+def erase_block(cell, size):
+    """Min corner of the `size` block centred on `cell`, for delete and paint.
+
+    Unlike `brush_block` this sits *on* the cell rather than beside it: you are
+    acting on what is there, not adding next to it.
+    """
+    if cell is None:
+        return None
+    return (_centred(cell[0], size[0]),
+            max(0, _centred(cell[1], size[1])),
+            _centred(cell[2], size[2]))
+
+
 def brush_block(hit_cell, info, size):
     """Min corner of the `size` (sx, sy, sz) block to stamp, or None.
 
@@ -89,6 +154,8 @@ def brush_block(hit_cell, info, size):
     """
     if hit_cell is not None:                  # placing against a voxel face
         normal = info
+        if normal is None:                    # started inside solid: no face
+            return None
         a = next(i for i in range(3) if normal[i] != 0)
         mn = []
         for i in range(3):
